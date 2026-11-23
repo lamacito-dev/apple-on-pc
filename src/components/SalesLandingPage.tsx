@@ -14,7 +14,11 @@ import {
   Usb,
   X,
 } from 'lucide-react';
-import { getWindowsExeFilename, getWindowsExeUrl } from '../lib/desktopBridge';
+import {
+  getLinuxAppImageUrl,
+  getWindowsExeFilename,
+  getWindowsExeUrl,
+} from '../lib/desktopBridge';
 
 const IMG_HERO = '/src/assets/images/sales_hero_usbc_1795427199295.jpg';
 const IMG_STEP_1 = '/src/assets/images/sales_step1_plug_1795427199294.jpg';
@@ -164,6 +168,7 @@ export function SalesLandingPage({
   onToggleDarkMode,
 }: SalesLandingPageProps) {
   const windowsExeUrl = getWindowsExeUrl();
+  const linuxAppImageUrl = getLinuxAppImageUrl();
   const exeFilename = getWindowsExeFilename(windowsExeUrl);
 
   const [activePreviewIdx, setActivePreviewIdx] = useState<number>(0);
@@ -259,7 +264,7 @@ export function SalesLandingPage({
                 directement sur votre disque dur — gratuitement, sans Mac, sans iTunes et sans cloud.
               </p>
 
-              <div className="flex flex-wrap items-center gap-5 pt-2">
+              <div className="flex flex-wrap items-center gap-4 pt-2">
                 <a
                   href={windowsExeUrl}
                   download={exeFilename}
@@ -273,6 +278,17 @@ export function SalesLandingPage({
                 </a>
 
                 <a
+                  href={linuxAppImageUrl}
+                  download="OpenFS-1.0.0.AppImage"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-4 py-3 text-sm font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Terminal size={15} />
+                  Télécharger pour Linux
+                </a>
+
+                <a
                   href="#apercu"
                   className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-700 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 underline underline-offset-4 transition-colors whitespace-nowrap"
                 >
@@ -282,7 +298,7 @@ export function SalesLandingPage({
               </div>
 
               <div className="text-xs text-slate-500 dark:text-slate-400">
-                Installeur Windows 64 bits (<span className="font-mono">{exeFilename}</span>) · Gratuit · Sans compte requis
+                Windows 64 bits (<span className="font-mono">{exeFilename}</span>) & Linux (<span className="font-mono">OpenFS-1.0.0.AppImage</span>) · Gratuit · Sans compte requis
               </div>
             </div>
 
@@ -407,7 +423,7 @@ export function SalesLandingPage({
                   sur votre Bureau et dans le menu Démarrer, s’exécute 100 % hors-ligne sans
                   navigateur et active le pont natif Windows WPD vers votre iPhone.
                 </p>
-                <div className="pt-2">
+                <div className="pt-2 flex flex-wrap items-center gap-3">
                   <a
                     href={windowsExeUrl}
                     download={exeFilename}
@@ -418,6 +434,16 @@ export function SalesLandingPage({
                   >
                     <Download size={14} />
                     Télécharger pour Windows (.exe)
+                  </a>
+                  <a
+                    href={linuxAppImageUrl}
+                    download="OpenFS-1.0.0.AppImage"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                  >
+                    <Terminal size={14} />
+                    Télécharger pour Linux (.AppImage)
                   </a>
                 </div>
               </div>
@@ -794,7 +820,7 @@ export function SalesLandingPage({
               </p>
             </div>
 
-            <div className="flex items-center shrink-0">
+            <div className="flex flex-wrap items-center gap-3 shrink-0">
               <a
                 href={windowsExeUrl}
                 download={exeFilename}
@@ -805,6 +831,16 @@ export function SalesLandingPage({
               >
                 <Download size={16} />
                 Télécharger pour Windows
+              </a>
+              <a
+                href={linuxAppImageUrl}
+                download="OpenFS-1.0.0.AppImage"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold rounded-lg border border-slate-600 text-white hover:bg-slate-800 transition-colors whitespace-nowrap"
+              >
+                <Terminal size={15} />
+                Télécharger pour Linux
               </a>
             </div>
           </div>

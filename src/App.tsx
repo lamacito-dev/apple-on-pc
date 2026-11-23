@@ -63,6 +63,7 @@ import { getDesktopBridge, type DesktopIphoneDevice } from './lib/desktopBridge'
 import { Sidebar } from './components/Sidebar';
 import { FilePane } from './components/FilePane';
 import { FileViewerModal } from './components/FileViewerModal';
+import { NativeAfcExplorerView } from './components/NativeAfcExplorerView';
 import { NativeMediaWorkspace } from './components/NativeMediaWorkspace';
 import { NativePcBrowserView } from './components/NativePcBrowserView';
 import { StorageAnalyzer } from './components/StorageAnalyzer';
@@ -231,8 +232,13 @@ export default function App() {
     }, 3400);
   }, []);
 
-  // Load or seed IndexedDB (plus ensure root_pc exists for returning users)
+  // Load or seed IndexedDB ONLY in browser preview mode — Native Electron mode = ZERO demo data!
   useEffect(() => {
+    if (getDesktopBridge()) {
+      setNodes([]);
+      setLoading(false);
+      return;
+    }
     let active = true;
     (async () => {
       try {
@@ -1712,8 +1718,11 @@ export default function App() {
                   setSplitView(true);
                   setActiveSection(desktopBridge ? 'photos' : 'browser');
                 }}
+                onOpenAfcStorage={() => setActiveSection('iphone_files')}
+                onOpenAfcApps={() => setActiveSection('iphone_apps')}
+                onToast={pushToast}
               />
-            ) : activeSection === 'storage' ? (
+            ) : activeSection === 'storage' && !desktopBridge ? (
               <StorageAnalyzer
                 nodes={nodes}
                 nodeMap={nodeMap}
@@ -1724,13 +1733,37 @@ export default function App() {
                 onImportFolder={handleMountIphoneVolume}
                 onResetFileSystem={handleResetFileSystem}
               />
+            ) : desktopBridge && (activeSection === 'iphone_files' || activeSection === 'iphone_apps') ? (
+              <NativeAfcExplorerView
+                initialMode={activeSection === 'iphone_apps' ? 'apps' : 'storage'}
+                device={activeNativeDevice}
+                pcDir={nativeDestDir}
+                searchQuery={searchQuery}
+                onChangePcDir={handlePickNativePcDir}
+                onFallbackToPhotos={() => setActiveSection('photos')}
+                onOpenUsbBridge={() => setActiveSection('usb_bridge')}
+                onRefreshDevices={() => scanNativeIphone(false)}
+                onToast={pushToast}
+              />
             ) : desktopBridge && (activeSection === 'photos' || activeSection === 'browser') ? (
-              activeNativeDevice?.status === 'ready' ? (
+              activeNativeDevice?.status === 'ready' && activeNativeDevice.backend === 'wpd' ? (
                 <NativeMediaWorkspace
                   device={activeNativeDevice}
                   pcDir={nativeDestDir}
                   searchQuery={searchQuery}
                   onChangePcDir={handlePickNativePcDir}
+                  onToast={pushToast}
+                />
+              ) : activeNativeDevice?.status === 'ready' && activeNativeDevice.backend === 'afc' ? (
+                <NativeAfcExplorerView
+                  initialMode="storage"
+                  device={activeNativeDevice}
+                  pcDir={nativeDestDir}
+                  searchQuery={searchQuery}
+                  onChangePcDir={handlePickNativePcDir}
+                  onFallbackToPhotos={() => setActiveSection('usb_bridge')}
+                  onOpenUsbBridge={() => setActiveSection('usb_bridge')}
+                  onRefreshDevices={() => scanNativeIphone(false)}
                   onToast={pushToast}
                 />
               ) : (
@@ -1743,7 +1776,7 @@ export default function App() {
                     </h2>
                     <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
                       {activeNativeDevice?.hint ||
-                        'Branchez votre iPhone en USB-C, déverrouillez l’écran et appuyez sur « Autoriser » ou « Faire confiance » pour afficher vos photos et vidéos classées par date.'}
+                        'Branchez votre iPhone en USB-C, déverrouillez l’écran et touchez « Se fier » pour afficher vos fichiers réels.'}
                     </p>
                     <div className="flex items-center justify-center gap-2.5 pt-1">
                       <button
@@ -1767,15 +1800,17 @@ export default function App() {
               )
             ) : desktopBridge && activeSection === 'documents' ? (
               <NativePcBrowserView
-                title="Documents"
+                title="Documents PC"
                 rootPath={nativeDocsDir}
                 searchQuery={searchQuery}
+                onToast={pushToast}
               />
             ) : desktopBridge && activeSection === 'downloads' ? (
               <NativePcBrowserView
                 title="Téléchargements"
                 rootPath={nativeDownloadsDir}
                 searchQuery={searchQuery}
+                onToast={pushToast}
               />
             ) : desktopBridge && activeSection === 'pc_storage' ? (
               <NativePcBrowserView
@@ -1784,6 +1819,7 @@ export default function App() {
                 searchQuery={searchQuery}
                 allowChangeRoot
                 onChangeRoot={handlePickNativePcDir}
+                onToast={pushToast}
               />
             ) : (
               <div className="flex-1 flex min-w-0 h-full overflow-hidden">

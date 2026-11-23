@@ -16,6 +16,8 @@ export type SidebarSection =
   | 'browser'
   | 'usb_bridge'
   | 'photos'
+  | 'iphone_files'
+  | 'iphone_apps'
   | 'documents'
   | 'downloads'
   | 'pc_storage'

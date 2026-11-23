@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowLeft,
   Calendar,
   Check,
@@ -13,6 +14,10 @@ import {
   List,
   Play,
   RefreshCw,
+  RotateCcw,
+  ShieldAlert,
+  ShieldCheck,
+  X,
 } from 'lucide-react';
 import {
   getDesktopBridge,
@@ -40,6 +45,22 @@ interface DateGroup {
   items: DesktopFsEntry[];
   photoCount: number;
   videoCount: number;
+}
+
+interface BatchItemOutcome {
+  item: DesktopFsEntry;
+  status: 'pending' | 'running' | 'verified' | 'mismatch' | 'failed';
+  sha256?: string;
+  copiedPath?: string;
+  error?: string;
+}
+
+/**
+ * Every WPD entry MUST be identified by its unique `shellPath` so Live Photos
+ * (e.g. IMG_0289.HEIC + IMG_0289.MOV sharing the same WPD Name "IMG_0289") NEVER collide!
+ */
+function getEntryKey(entry: DesktopFsEntry): string {
+  return entry.shellPath || entry.path;
 }
 
 function capitalizeFirst(str: string): string {
@@ -103,17 +124,23 @@ export function NativeMediaWorkspace({
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
   const [layout, setLayout] = useState<DisplayLayout>('grid');
   const [granularity, setGranularity] = useState<GroupGranularity>('month');
-  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
-  const [copying, setCopying] = useState(false);
+  // Selection keyed strictly by unique entryKey (shellPath || path)
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
 
-  // Thumbnail URL cache keyed by entry.path
+  // Batch export state with progress, SHA-256 verification & disconnect resume
+  const [batchOutcomes, setBatchOutcomes] = useState<BatchItemOutcome[]>([]);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchCurrentName, setBatchCurrentName] = useState('');
+  const cancelBatchRef = useRef(false);
+
+  // Thumbnail URL cache keyed strictly by unique entryKey (shellPath || path)
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const requestedThumbsRef = useRef<Set<string>>(new Set());
 
   // Inline Preview state
   const [previewEntry, setPreviewEntry] = useState<DesktopFsEntry | null>(null);
 
-  // Raw Folder view state (only when user switches to 'Dossiers')
+  // Raw Folder view state
   const [rawPath, setRawPath] = useState('');
   const [rawEntries, setRawEntries] = useState<DesktopFsEntry[]>([]);
   const [rawLoading, setRawLoading] = useState(false);
@@ -128,7 +155,7 @@ export function NativeMediaWorkspace({
         (e) => e.mediaType === 'photo' || e.mediaType === 'video' || e.mediaType === 'document'
       );
       setAllMedia(mediaOnly);
-      setSelectedPaths([]);
+      setSelectedKeys([]);
     } catch (err) {
       setError(
         err instanceof Error
@@ -177,7 +204,6 @@ export function NativeMediaWorkspace({
     }
   }, [layout, rawEntries.length, rawLoading, loadRawFolder]);
 
-  // Filtered media items
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return allMedia.filter((item) => {
@@ -191,7 +217,6 @@ export function NativeMediaWorkspace({
     });
   }, [allMedia, mediaFilter, searchQuery]);
 
-  // Group filtered items chronologically by date (newest first)
   const dateGroups = useMemo<DateGroup[]>(() => {
     const map = new Map<string, DateGroup>();
     for (const item of filteredItems) {
@@ -208,11 +233,14 @@ export function NativeMediaWorkspace({
     return Array.from(map.values()).sort((a, b) => b.key.localeCompare(a.key));
   }, [filteredItems, granularity]);
 
-  // Progressive batch thumbnail loading (non-blocking, 16 items per batch for snappy startup!)
+  // Progressive batch thumbnail loading keyed strictly by unique shellPath
   useEffect(() => {
     if (!bridge || layout === 'folders') return;
     const pending = filteredItems
-      .filter((item) => item.shellPath && !requestedThumbsRef.current.has(item.path))
+      .filter((item) => {
+        const k = getEntryKey(item);
+        return Boolean(item.shellPath) && !requestedThumbsRef.current.has(k);
+      })
       .slice(0, 160);
 
     if (pending.length === 0) return;
@@ -223,17 +251,17 @@ export function NativeMediaWorkspace({
       for (let i = 0; i < pending.length; i += BATCH_SIZE) {
         if (cancelled) return;
         const batch = pending.slice(i, i + BATCH_SIZE);
-        batch.forEach((b) => requestedThumbsRef.current.add(b.path));
+        batch.forEach((b) => requestedThumbsRef.current.add(getEntryKey(b)));
         try {
           const urls = await bridge.getThumbnailsBatch(
-            batch.map((b) => ({ key: b.path, shellPath: b.shellPath! })),
+            batch.map((b) => ({ key: getEntryKey(b), shellPath: b.shellPath! })),
             360
           );
           if (!cancelled && urls && Object.keys(urls).length > 0) {
             setThumbs((prev) => ({ ...prev, ...urls }));
           }
-        } catch {
-          // Continue cleanly to next batch
+        } catch (err) {
+          console.warn('[OpenFS] Lot vignettes partiel:', err);
         }
       }
     };
@@ -249,67 +277,153 @@ export function NativeMediaWorkspace({
     [filteredItems]
   );
 
-  const toggleSelect = (itemPath: string) => {
-    setSelectedPaths((prev) =>
-      prev.includes(itemPath) ? prev.filter((p) => p !== itemPath) : [...prev, itemPath]
+  const toggleSelect = (entryKey: string) => {
+    setSelectedKeys((prev) =>
+      prev.includes(entryKey) ? prev.filter((k) => k !== entryKey) : [...prev, entryKey]
     );
   };
 
   const toggleSelectGroup = (group: DateGroup) => {
-    const groupPaths = group.items.map((i) => i.path);
-    const allSelected = groupPaths.every((p) => selectedPaths.includes(p));
+    const groupKeys = group.items.map((i) => getEntryKey(i));
+    const allSelected = groupKeys.every((k) => selectedKeys.includes(k));
     if (allSelected) {
-      const removeSet = new Set(groupPaths);
-      setSelectedPaths((prev) => prev.filter((p) => !removeSet.has(p)));
+      const removeSet = new Set(groupKeys);
+      setSelectedKeys((prev) => prev.filter((k) => !removeSet.has(k)));
     } else {
-      setSelectedPaths((prev) => Array.from(new Set([...prev, ...groupPaths])));
+      setSelectedKeys((prev) => Array.from(new Set([...prev, ...groupKeys])));
+    }
+  };
+
+  const runBatchExport = async (initialOutcomes: BatchItemOutcome[]) => {
+    if (!bridge || batchRunning || initialOutcomes.length === 0) return;
+    cancelBatchRef.current = false;
+    setBatchRunning(true);
+    setBatchOutcomes(initialOutcomes);
+
+    const working = initialOutcomes.map((o) => ({ ...o }));
+    let verifiedCount = working.filter((o) => o.status === 'verified').length;
+    let failedCount = 0;
+
+    for (let i = 0; i < working.length; i++) {
+      const current = working[i];
+      if (current.status === 'verified') continue;
+      if (cancelBatchRef.current) break;
+
+      working[i] = { ...current, status: 'running', error: undefined };
+      setBatchCurrentName(current.item.name);
+      setBatchOutcomes([...working]);
+
+      try {
+        const res = await bridge.copyFromIphoneToPc(
+          device.id,
+          current.item.path,
+          pcDir || undefined,
+          current.item.shellPath || '',
+          current.item.name
+        );
+
+        if (res.verified) {
+          working[i] = {
+            ...current,
+            status: 'verified',
+            sha256: res.destSha256 || res.sourceSha256,
+            copiedPath: res.copiedPath,
+          };
+          verifiedCount += 1;
+        } else {
+          working[i] = {
+            ...current,
+            status: 'mismatch',
+            sha256: res.destSha256,
+            copiedPath: res.copiedPath,
+            error: 'Empreinte SHA-256 différente après copie.',
+          };
+          failedCount += 1;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Échec de copie (iPhone déconnecté ?)';
+        working[i] = {
+          ...current,
+          status: 'failed',
+          error: msg,
+        };
+        failedCount += 1;
+
+        // If iPhone clearly disconnected, mark remaining as pending so user can reconnect & resume in 1 click!
+        if (/déconnecté|introuvable|verrouillé|interrompu/i.test(msg)) {
+          setBatchOutcomes([...working]);
+          onToast(
+            `Transfert interrompu sur « ${current.item.name} ». Rebranchez l’iPhone puis cliquez sur « Reprendre ».`,
+            'error'
+          );
+          break;
+        }
+      }
+      setBatchOutcomes([...working]);
+    }
+
+    setBatchRunning(false);
+    setBatchCurrentName('');
+
+    const remainingPending = working.filter((o) => o.status === 'pending').length;
+    if (failedCount === 0 && remainingPending === 0) {
+      setSelectedKeys([]);
+      onToast(
+        verifiedCount === 1
+          ? `« ${working[0].item.name} » copié — SHA-256 vérifié ✓`
+          : `${verifiedCount} fichiers copiés sur le PC — empreintes SHA-256 vérifiées ✓`,
+        'success'
+      );
+    } else if (failedCount > 0) {
+      onToast(
+        `${verifiedCount} vérifié(s), ${failedCount} échec(s). Vous pouvez reprendre les fichiers restants.`,
+        'error'
+      );
     }
   };
 
   const handleCopyItemsToPc = async (itemsToCopy: DesktopFsEntry[]) => {
-    if (!bridge || copying) return;
     if (itemsToCopy.length === 0) {
       onToast('Sélectionnez une ou plusieurs photos/vidéos à copier vers votre PC.', 'info');
       return;
     }
+    const queue: BatchItemOutcome[] = itemsToCopy.map((item) => ({
+      item,
+      status: 'pending',
+    }));
+    await runBatchExport(queue);
+  };
 
-    setCopying(true);
-    let copied = 0;
-    try {
-      for (const item of itemsToCopy) {
-        await bridge.copyFromIphoneToPc(device.id, item.path, pcDir || undefined);
-        copied += 1;
-      }
-      onToast(
-        copied === 1
-          ? `« ${itemsToCopy[0].name} » copié sur votre PC.`
-          : `${copied} fichiers copiés dans votre dossier PC.`,
-        'success'
-      );
-      setSelectedPaths([]);
-    } catch (err) {
-      onToast(
-        err instanceof Error ? err.message : 'Erreur lors de la copie vers le PC.',
-        'error'
-      );
-    } finally {
-      setCopying(false);
-    }
+  const handleResumeBatch = async () => {
+    const nextQueue = batchOutcomes.map((o) =>
+      o.status === 'verified' ? o : { ...o, status: 'pending' as const, error: undefined }
+    );
+    await runBatchExport(nextQueue);
   };
 
   const handlePrimaryCopy = () => {
-    const targets =
-      selectedPaths.length > 0
-        ? filteredItems.filter((i) => selectedPaths.includes(i.path))
-        : [];
+    const keySet = new Set(selectedKeys);
+    const targets = filteredItems.filter((i) => keySet.has(getEntryKey(i)));
     if (targets.length === 0) {
-      onToast('Cochez les photos ou vidéos à copier, ou cliquez sur « Sélectionner ce mois ».', 'info');
+      onToast('Cochez les photos ou vidéos à copier, ou cliquez sur « Sélectionner tout ».', 'info');
       return;
     }
     handleCopyItemsToPc(targets);
   };
 
-  // Inline Preview View (Screen 03)
+  const batchStats = useMemo(() => {
+    const total = batchOutcomes.length;
+    const verified = batchOutcomes.filter((o) => o.status === 'verified').length;
+    const failed = batchOutcomes.filter(
+      (o) => o.status === 'failed' || o.status === 'mismatch'
+    ).length;
+    const pending = batchOutcomes.filter((o) => o.status === 'pending').length;
+    const done = verified + failed;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    return { total, verified, failed, pending, done, pct };
+  }, [batchOutcomes]);
+
+  // Inline Preview View
   if (previewEntry) {
     return (
       <NativePreviewView
@@ -323,6 +437,7 @@ export function NativeMediaWorkspace({
         onExportToPc={async (entry) => {
           await handleCopyItemsToPc([entry]);
         }}
+        onToast={onToast}
       />
     );
   }
@@ -338,12 +453,11 @@ export function NativeMediaWorkspace({
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
               {loading
-                ? 'Regroupement chronologique en cours...'
+                ? 'Analyse de la photothèque réelle...'
                 : `${filteredItems.length} élément${filteredItems.length > 1 ? 's' : ''} · ${formatBytes(totalSize)} · Classés par date`}
             </p>
           </div>
 
-          {/* Segmented Media Type Filter */}
           {layout !== 'folders' && (
             <div className="inline-flex items-center p-0.5 rounded-lg bg-slate-100 dark:bg-slate-800/90">
               {(
@@ -370,7 +484,6 @@ export function NativeMediaWorkspace({
           )}
         </div>
 
-        {/* Right Controls: Grouping, Display Mode, Primary Action */}
         <div className="flex items-center gap-2 shrink-0">
           {layout !== 'folders' && (
             <button
@@ -384,7 +497,6 @@ export function NativeMediaWorkspace({
             </button>
           )}
 
-          {/* Layout Switcher: Grille / Liste / Dossiers */}
           <div className="inline-flex items-center p-0.5 rounded-lg bg-slate-100 dark:bg-slate-800/90">
             <button
               type="button"
@@ -437,25 +549,116 @@ export function NativeMediaWorkspace({
           {layout !== 'folders' && (
             <button
               type="button"
-              disabled={copying || selectedPaths.length === 0}
+              disabled={batchRunning || selectedKeys.length === 0}
               onClick={handlePrimaryCopy}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#1A65C7] hover:bg-[#1557B0] disabled:opacity-45 text-white text-xs font-medium transition-colors whitespace-nowrap"
             >
-              {copying ? <RefreshCw size={13} className="animate-spin" /> : <Download size={13} />}
-              {copying
-                ? 'Copie...'
-                : selectedPaths.length > 0
-                  ? `Copier vers PC (${selectedPaths.length})`
-                  : 'Copier vers PC'}
+              {batchRunning ? (
+                <RefreshCw size={13} className="animate-spin" />
+              ) : (
+                <Download size={13} />
+              )}
+              {batchRunning
+                ? `Export ${batchStats.done}/${batchStats.total}...`
+                : selectedKeys.length > 0
+                  ? `Exporter vers PC (${selectedKeys.length})`
+                  : 'Exporter vers PC'}
             </button>
           )}
         </div>
       </div>
 
+      {/* Batch Export Progress & SHA-256 Verification Banner */}
+      {batchOutcomes.length > 0 && (
+        <div className="px-6 py-3 border-b border-slate-200/80 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-900/70 space-y-2.5 shrink-0">
+          <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2.5 min-w-0">
+              {batchRunning ? (
+                <RefreshCw size={14} className="animate-spin text-[#1A65C7] shrink-0" />
+              ) : batchStats.failed > 0 || batchStats.pending > 0 ? (
+                <AlertTriangle size={14} className="text-amber-500 shrink-0" />
+              ) : (
+                <ShieldCheck size={15} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+              )}
+              <span className="font-medium text-slate-900 dark:text-slate-100 truncate">
+                {batchRunning
+                  ? `Export + vérification SHA-256 : ${batchCurrentName} (${batchStats.done}/${batchStats.total})`
+                  : batchStats.failed === 0 && batchStats.pending === 0
+                    ? `Export terminé : ${batchStats.verified}/${batchStats.total} vérifié(s) par SHA-256 ✓`
+                    : `Export partiel : ${batchStats.verified} vérifié(s), ${batchStats.failed} échec(s)${
+                        batchStats.pending > 0 ? `, ${batchStats.pending} en attente` : ''
+                      }`}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {batchRunning ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    cancelBatchRef.current = true;
+                  }}
+                  className="px-2.5 py-1 rounded-md border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  Interrompre
+                </button>
+              ) : (
+                <>
+                  {(batchStats.failed > 0 || batchStats.pending > 0) && (
+                    <button
+                      type="button"
+                      onClick={handleResumeBatch}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#1A65C7] hover:bg-[#1557B0] text-white font-medium"
+                    >
+                      <RotateCcw size={12} />
+                      Reprendre / Réessayer ({batchStats.failed + batchStats.pending})
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setBatchOutcomes([])}
+                    aria-label="Fermer le rapport d’export"
+                    className="p-1 rounded-md text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                  >
+                    <X size={14} />
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+            <div
+              className={`h-full transition-all duration-200 ${
+                batchStats.failed > 0 ? 'bg-amber-500' : 'bg-[#1A65C7]'
+              }`}
+              style={{ width: `${batchStats.pct}%` }}
+            />
+          </div>
+
+          {/* Failed or Mismatched Items Detail */}
+          {batchStats.failed > 0 && (
+            <div className="max-h-28 overflow-y-auto space-y-1 pt-0.5">
+              {batchOutcomes
+                .filter((o) => o.status === 'failed' || o.status === 'mismatch')
+                .map((o) => (
+                  <div
+                    key={getEntryKey(o.item)}
+                    className="flex items-center gap-2 text-[11px] text-red-600 dark:text-red-400"
+                  >
+                    <ShieldAlert size={12} className="shrink-0" />
+                    <span className="font-mono font-medium shrink-0">{o.item.name}</span>
+                    <span className="truncate">— {o.error}</span>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Main Scrollable Content */}
       <div className="flex-1 overflow-y-auto px-6 py-6">
         {layout === 'folders' ? (
-          /* Optional Raw Folder Tree View */
           <div className="max-w-4xl space-y-3">
             <div className="flex items-center gap-2.5">
               {rawPath && (
@@ -492,7 +695,7 @@ export function NativeMediaWorkspace({
               <div className="space-y-2">
                 {rawEntries.map((entry) => (
                   <div
-                    key={entry.path}
+                    key={getEntryKey(entry)}
                     onClick={() => {
                       if (entry.kind === 'folder') {
                         loadRawFolder(entry.path);
@@ -545,7 +748,6 @@ export function NativeMediaWorkspace({
             )}
           </div>
         ) : loading ? (
-          /* Clean Skeleton Grid while scanning all iPhone folders once */
           <div className="space-y-6">
             <div className="h-5 w-40 rounded bg-slate-200/80 dark:bg-slate-800 animate-pulse" />
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
@@ -585,11 +787,10 @@ export function NativeMediaWorkspace({
             </p>
           </div>
         ) : (
-          /* Chronological Date-Grouped Media Feed (No more 202607_a / 202608_a chaos!) */
           <div className="space-y-9">
             {dateGroups.map((group) => {
               const allGroupSelected = group.items.every((item) =>
-                selectedPaths.includes(item.path)
+                selectedKeys.includes(getEntryKey(item))
               );
               const metaParts: string[] = [];
               if (group.photoCount > 0) {
@@ -601,7 +802,6 @@ export function NativeMediaWorkspace({
 
               return (
                 <section key={group.key} className="space-y-3.5">
-                  {/* Date Section Header */}
                   <div className="flex items-baseline justify-between gap-4 pb-2 border-b border-slate-200/70 dark:border-slate-800/80">
                     <div className="flex items-baseline gap-2.5 min-w-0">
                       <h2 className="text-[15px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">
@@ -624,13 +824,14 @@ export function NativeMediaWorkspace({
                   {layout === 'grid' ? (
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
                       {group.items.map((item) => {
-                        const isSelected = selectedPaths.includes(item.path);
-                        const thumbUrl = thumbs[item.path];
+                        const key = getEntryKey(item);
+                        const isSelected = selectedKeys.includes(key);
+                        const thumbUrl = thumbs[key];
                         const isVideo = item.mediaType === 'video';
 
                         return (
                           <div
-                            key={item.path}
+                            key={key}
                             onClick={() => setPreviewEntry(item)}
                             className={`group relative rounded-xl border bg-white dark:bg-slate-900 overflow-hidden cursor-pointer transition-all ${
                               isSelected
@@ -638,7 +839,6 @@ export function NativeMediaWorkspace({
                                 : 'border-slate-200/85 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
                             }`}
                           >
-                            {/* Media Thumbnail Frame */}
                             <div className="relative aspect-[4/3] bg-slate-100 dark:bg-slate-800/70 overflow-hidden flex items-center justify-center">
                               {thumbUrl ? (
                                 <img
@@ -656,7 +856,6 @@ export function NativeMediaWorkspace({
                                 />
                               )}
 
-                              {/* Video scrim indicator */}
                               {isVideo && (
                                 <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/75 via-black/30 to-transparent flex items-end justify-between px-2.5 pb-2 pointer-events-none">
                                   <span className="inline-flex items-center gap-1 text-[11px] font-medium text-white">
@@ -666,13 +865,12 @@ export function NativeMediaWorkspace({
                                 </div>
                               )}
 
-                              {/* Selection checkbox button */}
                               <button
                                 type="button"
                                 aria-label={`Sélectionner ${item.name}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  toggleSelect(item.path);
+                                  toggleSelect(key);
                                 }}
                                 className={`absolute top-2 left-2 w-6 h-6 rounded-md flex items-center justify-center transition-all ${
                                   isSelected
@@ -684,7 +882,6 @@ export function NativeMediaWorkspace({
                               </button>
                             </div>
 
-                            {/* Clean 2-Line Caption */}
                             <div className="px-3 py-2.5">
                               <div className="text-xs font-medium text-slate-900 dark:text-slate-100 truncate">
                                 {item.name}
@@ -699,16 +896,16 @@ export function NativeMediaWorkspace({
                       })}
                     </div>
                   ) : (
-                    /* Clean Chronological List View */
                     <div className="space-y-2">
                       {group.items.map((item) => {
-                        const isSelected = selectedPaths.includes(item.path);
-                        const thumbUrl = thumbs[item.path];
+                        const key = getEntryKey(item);
+                        const isSelected = selectedKeys.includes(key);
+                        const thumbUrl = thumbs[key];
                         const isVideo = item.mediaType === 'video';
 
                         return (
                           <div
-                            key={item.path}
+                            key={key}
                             onClick={() => setPreviewEntry(item)}
                             className={`group flex items-center gap-3.5 px-3.5 py-2.5 rounded-xl border cursor-pointer transition-all ${
                               isSelected
@@ -721,7 +918,7 @@ export function NativeMediaWorkspace({
                               aria-label={`Sélectionner ${item.name}`}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                toggleSelect(item.path);
+                                toggleSelect(key);
                               }}
                               className={`w-5 h-5 rounded flex items-center justify-center shrink-0 transition-colors ${
                                 isSelected

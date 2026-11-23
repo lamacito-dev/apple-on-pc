@@ -1,8 +1,10 @@
 import {
+  AppWindow,
   Camera,
   Download,
   FileText,
   Folder,
+  FolderTree,
   Globe,
   HardDrive,
   Moon,
@@ -44,96 +46,153 @@ export function Sidebar({
   const isDesktopExe = isNativeDesktopApp();
   const trashedCount = nodes.filter((n) => n.trashed).length;
 
-  const navItems = [
-    {
-      id: 'iphone_usb',
-      label: 'iPhone USB-C',
-      icon: Smartphone,
-      active: activeSection === 'usb_bridge',
-      onClick: () => {
-        onSelectSection('usb_bridge');
-        onCloseMobile();
-      },
-    },
-    {
-      id: 'photos',
-      label: 'Photos & Vidéos',
-      icon: Camera,
-      active:
-        activeSection === 'photos' ||
-        (activeSection === 'browser' &&
-          activePaneId === 'primary' &&
-          (activeFolderId === 'dir_100apple' ||
-            activeFolderId === 'dir_dcim' ||
-            activeFolderId === 'dir_media' ||
-            activeFolderId === 'root_internal')),
-      onClick: () => {
-        if (isDesktopExe) {
-          onSelectSection('photos');
-        } else {
-          onSelectSection('browser');
-          onSelectFolder('dir_100apple', 'primary');
-        }
-        onCloseMobile();
-      },
-    },
-    {
-      id: 'documents',
-      label: 'Documents',
-      icon: FileText,
-      active:
-        activeSection === 'documents' ||
-        (activeSection === 'browser' &&
-          activePaneId === 'primary' &&
-          (activeFolderId === 'dir_documents' || activeFolderId === 'root_containers')),
-      onClick: () => {
-        if (isDesktopExe) {
-          onSelectSection('documents');
-        } else {
-          onSelectSection('browser');
-          onSelectFolder('dir_documents', 'primary');
-        }
-        onCloseMobile();
-      },
-    },
-    {
-      id: 'downloads',
-      label: 'Téléchargements',
-      icon: Download,
-      active:
-        activeSection === 'downloads' ||
-        (activeSection === 'browser' &&
-          activePaneId === 'primary' &&
-          activeFolderId === 'dir_downloads'),
-      onClick: () => {
-        if (isDesktopExe) {
-          onSelectSection('downloads');
-        } else {
-          onSelectSection('browser');
-          onSelectFolder('dir_downloads', 'primary');
-        }
-        onCloseMobile();
-      },
-    },
-    {
-      id: 'pc_storage',
-      label: 'Stockage PC',
-      icon: HardDrive,
-      active:
-        activeSection === 'pc_storage' ||
-        (activeSection === 'browser' &&
-          (activePaneId === 'secondary' || activeFolderId === 'root_pc')),
-      onClick: () => {
-        if (isDesktopExe) {
-          onSelectSection('pc_storage');
-        } else {
-          onSelectSection('browser');
-          onSelectFolder('root_pc', 'secondary');
-        }
-        onCloseMobile();
-      },
-    },
-  ];
+  const navItems = isDesktopExe
+    ? [
+        {
+          id: 'iphone_usb',
+          label: 'iPhone USB-C',
+          icon: Smartphone,
+          active: activeSection === 'usb_bridge',
+          onClick: () => {
+            onSelectSection('usb_bridge');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'photos',
+          label: 'Photos & Vidéos',
+          icon: Camera,
+          active: activeSection === 'photos' || activeSection === 'browser',
+          onClick: () => {
+            onSelectSection('photos');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'iphone_files',
+          label: 'Stockage iPhone',
+          icon: FolderTree,
+          active: activeSection === 'iphone_files',
+          onClick: () => {
+            onSelectSection('iphone_files');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'iphone_apps',
+          label: 'Documents d’apps',
+          icon: AppWindow,
+          active: activeSection === 'iphone_apps',
+          onClick: () => {
+            onSelectSection('iphone_apps');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'documents',
+          label: 'Documents PC',
+          icon: FileText,
+          active: activeSection === 'documents',
+          onClick: () => {
+            onSelectSection('documents');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'downloads',
+          label: 'Téléchargements',
+          icon: Download,
+          active: activeSection === 'downloads',
+          onClick: () => {
+            onSelectSection('downloads');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'pc_storage',
+          label: 'Stockage PC',
+          icon: HardDrive,
+          active: activeSection === 'pc_storage',
+          onClick: () => {
+            onSelectSection('pc_storage');
+            onCloseMobile();
+          },
+        },
+      ]
+    : [
+        {
+          id: 'iphone_usb',
+          label: 'iPhone USB-C',
+          icon: Smartphone,
+          active: activeSection === 'usb_bridge',
+          onClick: () => {
+            onSelectSection('usb_bridge');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'photos',
+          label: 'Photos & Vidéos',
+          icon: Camera,
+          active:
+            activeSection === 'photos' ||
+            (activeSection === 'browser' &&
+              activePaneId === 'primary' &&
+              (activeFolderId === 'dir_100apple' ||
+                activeFolderId === 'dir_dcim' ||
+                activeFolderId === 'dir_media' ||
+                activeFolderId === 'root_internal')),
+          onClick: () => {
+            onSelectSection('browser');
+            onSelectFolder('dir_100apple', 'primary');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'documents',
+          label: 'Documents',
+          icon: FileText,
+          active:
+            activeSection === 'documents' ||
+            (activeSection === 'browser' &&
+              activePaneId === 'primary' &&
+              (activeFolderId === 'dir_documents' || activeFolderId === 'root_containers')),
+          onClick: () => {
+            onSelectSection('browser');
+            onSelectFolder('dir_documents', 'primary');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'downloads',
+          label: 'Téléchargements',
+          icon: Download,
+          active:
+            activeSection === 'downloads' ||
+            (activeSection === 'browser' &&
+              activePaneId === 'primary' &&
+              activeFolderId === 'dir_downloads'),
+          onClick: () => {
+            onSelectSection('browser');
+            onSelectFolder('dir_downloads', 'primary');
+            onCloseMobile();
+          },
+        },
+        {
+          id: 'pc_storage',
+          label: 'Stockage PC',
+          icon: HardDrive,
+          active:
+            activeSection === 'pc_storage' ||
+            (activeSection === 'browser' &&
+              (activePaneId === 'secondary' || activeFolderId === 'root_pc')),
+          onClick: () => {
+            onSelectSection('browser');
+            onSelectFolder('root_pc', 'secondary');
+            onCloseMobile();
+          },
+        },
+      ];
 
   const content = (
     <aside className="flex flex-col h-full w-56 bg-[#F3F6FA] dark:bg-slate-950 select-none shrink-0">

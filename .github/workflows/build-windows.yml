@@ -1,4 +1,4 @@
-name: Build OpenFS Windows Installer (.exe)
+name: Build OpenFS Installers (Windows & Linux)
 
 on:
   workflow_dispatch:
@@ -26,6 +26,61 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Setup MSYS2 UCRT64 with libimobiledevice, ideviceinstaller & libplist
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-libimobiledevice
+            mingw-w64-ucrt-x86_64-ideviceinstaller
+            mingw-w64-ucrt-x86_64-libplist
+
+      - name: Stage Windows libimobiledevice binaries, DLLs & LGPL licenses
+        shell: msys2 {0}
+        run: |
+          set -e
+          DEST="desktop/resources/libimobiledevice"
+          mkdir -p "$DEST/LICENSES"
+
+          TOOLS="idevice_id ideviceinfo idevicepair afcclient ideviceinstaller plistutil"
+          for tool in $TOOLS; do
+            BIN="/ucrt64/bin/${tool}.exe"
+            if [ ! -f "$BIN" ]; then
+              echo "ERROR: Missing expected binary $BIN"
+              exit 1
+            fi
+            cp "$BIN" "$DEST/"
+            echo "=== Verifying ${tool}.exe --help ==="
+            "$BIN" --help || true
+            # Collect all MSYS2/UCRT64 DLL dependencies (excluding Windows system DLLs)
+            ldd "$BIN" | awk '/=> \/ucrt64\/bin\// { print $3 }' | while read -r dll; do
+              if [ -f "$dll" ]; then
+                cp -n "$dll" "$DEST/"
+              fi
+            done
+          done
+
+          # Copy transitive DLL dependencies of copied DLLs (2nd pass)
+          for dll in "$DEST"/*.dll; do
+            [ -f "$dll" ] || continue
+            ldd "$dll" | awk '/=> \/ucrt64\/bin\// { print $3 }' | while read -r dep; do
+              if [ -f "$dep" ]; then
+                cp -n "$dep" "$DEST/"
+              fi
+            done
+          done
+
+          # Bundle LGPL / open-source licenses for bundled libimobiledevice & dependencies
+          for pkg in libimobiledevice ideviceinstaller libplist libusbmuxd libimobiledevice-glue libtatsu openssl zlib libzip; do
+            if [ -d "/ucrt64/share/licenses/$pkg" ]; then
+              mkdir -p "$DEST/LICENSES/$pkg"
+              cp -r "/ucrt64/share/licenses/$pkg/." "$DEST/LICENSES/$pkg/"
+            fi
+          done
+
+          ls -la "$DEST"
+
       - name: Install web dependencies
         run: npm install --legacy-peer-deps
 
@@ -33,7 +88,7 @@ jobs:
         working-directory: desktop
         run: npm install --legacy-peer-deps
 
-      - name: Build OpenFS-Setup.exe and Portable .exe
+      - name: Build OpenFS-Setup-1.0.0.exe and OpenFS-Portable-1.0.0.exe
         working-directory: desktop
         run: npm run build:win
 
@@ -42,20 +97,79 @@ jobs:
         with:
           name: OpenFS-Windows-Installers
           path: |
-            desktop/release/OpenFS-Setup-*.exe
-            desktop/release/OpenFS-Portable-*.exe
+            desktop/release/OpenFS-Setup-1.0.0.exe
+            desktop/release/OpenFS-Portable-1.0.0.exe
 
-      - name: Publish GitHub Release with direct .exe downloads
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install web dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Install desktop Electron dependencies
+        working-directory: desktop
+        run: npm install --legacy-peer-deps
+
+      - name: Build OpenFS-1.0.0.AppImage and OpenFS-1.0.0.deb
+        working-directory: desktop
+        run: npm run build:linux
+
+      - name: Verify fixed Linux artifact names
+        run: |
+          ls -la desktop/release/
+          test -f desktop/release/OpenFS-1.0.0.AppImage
+          test -f desktop/release/OpenFS-1.0.0.deb
+
+      - name: Upload Linux installers as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenFS-Linux-Installers
+          path: |
+            desktop/release/OpenFS-1.0.0.AppImage
+            desktop/release/OpenFS-1.0.0.deb
+
+  publish-release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Windows installers
+        uses: actions/download-artifact@v4
+        with:
+          name: OpenFS-Windows-Installers
+          path: release-assets
+
+      - name: Download Linux installers
+        uses: actions/download-artifact@v4
+        with:
+          name: OpenFS-Linux-Installers
+          path: release-assets
+
+      - name: List all release assets
+        run: ls -la release-assets
+
+      - name: Publish GitHub Release with Windows & Linux downloads
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0
-          name: OpenFS v1.0.0 (Windows)
+          name: OpenFS v1.0.0 (Windows & Linux)
           body: |
-            ### OpenFS pour Windows 10 / 11
-            - **OpenFS-Setup-1.0.0.exe** : Installeur complet avec icône Bureau, Menu Démarrer et pont USB-C natif Windows WPD (`Ce PC -> Apple iPhone`).
-            - **OpenFS-Portable-1.0.0.exe** : Version exécutable directe sans installation.
+            ### OpenFS pour Windows 10 / 11 & Linux
+            - **OpenFS-Setup-1.0.0.exe** : Installeur Windows 64 bits avec WPD + libimobiledevice (AFC, documents d'apps, fichiers cachés, éditeur .plist, transfert bidirectionnel) et licences LGPL.
+            - **OpenFS-Portable-1.0.0.exe** : Version Windows exécutable sans installation.
+            - **OpenFS-1.0.0.AppImage** : Exécutable Linux portable (Ubuntu, Debian, Fedora, Arch) avec montage `usbmuxd` + `ifuse` vers `~/iPhone-USB` et accès AFC complet.
+            - **OpenFS-1.0.0.deb** : Paquet Debian / Ubuntu 64 bits.
           files: |
-            desktop/release/OpenFS-Setup-*.exe
-            desktop/release/OpenFS-Portable-*.exe
+            release-assets/OpenFS-Setup-1.0.0.exe
+            release-assets/OpenFS-Portable-1.0.0.exe
+            release-assets/OpenFS-1.0.0.AppImage
+            release-assets/OpenFS-1.0.0.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
