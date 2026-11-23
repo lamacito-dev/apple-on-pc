@@ -30,6 +30,7 @@
     ],
     "win": {
       "icon": "../public/pwa-512x512.png",
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",

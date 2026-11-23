@@ -6,12 +6,15 @@ import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
+  const isDesktopBuild = process.env.DESKTOP_BUILD === 'true';
+
   return {
-    base: process.env.DESKTOP_BUILD === 'true' ? './' : '/',
+    base: isDesktopBuild ? './' : '/',
     plugins: [
       react(),
       tailwindcss(),
       VitePWA({
+        disable: isDesktopBuild,
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         manifest: {
