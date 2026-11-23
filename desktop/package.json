@@ -1,0 +1,61 @@
+{
+  "name": "openfs-desktop",
+  "version": "1.0.0",
+  "description": "OpenFS — Application Windows & Linux native pour accéder aux fichiers iPhone en USB-C (WPD / AFC)",
+  "main": "main.cjs",
+  "private": true,
+  "scripts": {
+    "prepare:web": "node scripts/prepare-web.cjs",
+    "start": "electron .",
+    "build:win": "npm run prepare:web && electron-builder --win nsis portable",
+    "build:linux": "npm run prepare:web && electron-builder --linux AppImage deb"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^35.1.5",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.openfs.desktop",
+    "productName": "OpenFS",
+    "copyright": "Copyright © OpenFS",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "iphoneBridge.cjs",
+      "web-dist/**/*"
+    ],
+    "win": {
+      "icon": "../public/pwa-512x512.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "OpenFS",
+      "artifactName": "OpenFS-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "OpenFS-Portable-${version}.exe"
+    },
+    "linux": {
+      "icon": "../public/pwa-512x512.png",
+      "category": "Utility",
+      "target": ["AppImage", "deb"]
+    }
+  }
+}

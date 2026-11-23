@@ -1,0 +1,6 @@
+{
+  "name": "OpenFS",
+  "description": "Accédez aux fichiers de votre iPhone branché en USB-C sur Windows ou Linux : détection WebUSB, montage AFC/ifuse, double panneau iPhone ↔ PC, éditeur et archives ZIP.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

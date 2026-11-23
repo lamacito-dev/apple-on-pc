@@ -1,0 +1,59 @@
+name: Build OpenFS Windows Installer (.exe)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install web dependencies
+        run: npm install
+
+      - name: Install desktop Electron dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build OpenFS-Setup.exe and Portable .exe
+        working-directory: desktop
+        run: npm run build:win
+
+      - name: Upload Windows .exe installers as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenFS-Windows-Installers
+          path: |
+            desktop/release/OpenFS-Setup-*.exe
+            desktop/release/OpenFS-Portable-*.exe
+
+      - name: Publish GitHub Release with direct .exe downloads
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: OpenFS v1.0.0 (Windows)
+          body: |
+            ### OpenFS pour Windows 10 / 11
+            - **OpenFS-Setup-1.0.0.exe** : Installeur complet avec icône Bureau, Menu Démarrer et pont USB-C natif Windows WPD (`Ce PC -> Apple iPhone`).
+            - **OpenFS-Portable-1.0.0.exe** : Version exécutable directe sans installation.
+          files: |
+            desktop/release/OpenFS-Setup-*.exe
+            desktop/release/OpenFS-Portable-*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
