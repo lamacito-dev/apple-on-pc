@@ -2,31 +2,17 @@ import { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   Check,
-  Columns2,
-  Copy,
   Download,
   File as FileIcon,
   Folder,
-  FolderOpen,
-  HardDrive,
-  Laptop,
-  Play,
   RefreshCw,
-  ShieldCheck,
-  Smartphone,
-  Terminal,
-  Unplug,
-  Usb,
 } from 'lucide-react';
 import {
-  isDirectoryPickerSupported,
   isWebUsbSupported,
   type ConnectedUsbDeviceInfo,
 } from '../lib/webUsbBridge';
 import {
   getDesktopBridge,
-  getWindowsExeFilename,
-  getWindowsExeUrl,
   type DesktopFsEntry,
   type DesktopIphoneDevice,
 } from '../lib/desktopBridge';
@@ -35,8 +21,16 @@ import { formatBytes } from '../lib/fsUtils';
 interface UsbBridgeViewProps {
   usbDevice: ConnectedUsbDeviceInfo | null;
   usbError: string | null;
+  nativeDevices: DesktopIphoneDevice[];
+  activeNativeDevice: DesktopIphoneDevice | null;
+  nativeDestDir: string;
+  nativeBusy: boolean;
+  nativeError: string | null;
   mountedIphoneDirName: string | null;
   mountedPcDirName: string | null;
+  onScanNativeIphone: (silent?: boolean) => Promise<void>;
+  onSelectNativeDevice: (device: DesktopIphoneDevice) => void;
+  onPickNativePcDir: () => Promise<void>;
   onConnectWebUsb: (appleOnly?: boolean) => Promise<void>;
   onDisconnectUsb: () => void;
   onEnableDemoUsb: () => void;
@@ -48,567 +42,457 @@ interface UsbBridgeViewProps {
 export function UsbBridgeView({
   usbDevice,
   usbError,
+  nativeDevices,
+  activeNativeDevice,
+  nativeDestDir,
+  nativeBusy,
+  nativeError,
   mountedIphoneDirName,
   mountedPcDirName,
+  onScanNativeIphone,
+  onSelectNativeDevice,
+  onPickNativePcDir,
   onConnectWebUsb,
   onDisconnectUsb,
   onEnableDemoUsb,
-  onMountIphoneVolume,
   onMountPcDirectory,
   onOpenDualPaneExplorer,
 }: UsbBridgeViewProps) {
   const desktopBridge = getDesktopBridge();
-  const windowsExeUrl = getWindowsExeUrl();
-  const windowsExeFilename = getWindowsExeFilename(windowsExeUrl);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const webUsbOk = isWebUsbSupported();
 
-  // Native Electron Windows WPD / AFC State
-  const [nativeDevices, setNativeDevices] = useState<DesktopIphoneDevice[]>([]);
-  const [activeNativeDevice, setActiveNativeDevice] = useState<DesktopIphoneDevice | null>(null);
+  // Optional quick folder browser on Pont USB-C when a native WPD device is ready
   const [nativePath, setNativePath] = useState<string>('');
   const [nativeEntries, setNativeEntries] = useState<DesktopFsEntry[]>([]);
-  const [nativeDestDir, setNativeDestDir] = useState<string>('');
-  const [nativeBusy, setNativeBusy] = useState(false);
-  const [nativeStatus, setNativeStatus] = useState<string | null>(null);
-  const [nativeError, setNativeError] = useState<string | null>(null);
-
-  const webUsbOk = isWebUsbSupported();
-  const fsApiOk = isDirectoryPickerSupported();
+  const [browseBusy, setBrowseBusy] = useState(false);
+  const [browseStatus, setBrowseStatus] = useState<string | null>(null);
+  const [browseError, setBrowseError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!desktopBridge) return;
-    desktopBridge
-      .getDefaultSyncDir()
-      .then((dir) => setNativeDestDir(dir))
-      .catch(() => {});
-  }, [desktopBridge]);
-
-  const scanNativeIphone = async () => {
-    if (!desktopBridge) return;
-    setNativeBusy(true);
-    setNativeError(null);
-    setNativeStatus(null);
-    try {
-      const devices = await desktopBridge.listIphoneDevices();
-      setNativeDevices(devices);
-      if (devices.length === 0) {
-        setActiveNativeDevice(null);
-        setNativeEntries([]);
-        setNativePath('');
-        setNativeError(
-          'Aucun iPhone détecté. Branchez votre iPhone en USB-C, déverrouillez-le et appuyez sur « Faire confiance ».'
-        );
-      } else {
-        const first = devices[0];
-        setActiveNativeDevice(first);
-        setNativePath('');
-        const entries = await desktopBridge.listIphoneDirectory(first.id, '');
-        setNativeEntries(entries);
-        setNativeStatus(`Connecté en natif : ${first.name}`);
-      }
-    } catch (err) {
-      setNativeError(err instanceof Error ? err.message : 'Erreur de lecture USB-C native.');
-    } finally {
-      setNativeBusy(false);
+    if (!desktopBridge || !activeNativeDevice || activeNativeDevice.status !== 'ready') {
+      setNativeEntries([]);
+      setNativePath('');
+      return;
     }
-  };
+
+    let cancelled = false;
+    setBrowseBusy(true);
+    setBrowseError(null);
+    desktopBridge
+      .listIphoneDirectory(activeNativeDevice.id, '')
+      .then((entries) => {
+        if (cancelled) return;
+        setNativePath('');
+        setNativeEntries(entries);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBrowseError(
+          err instanceof Error ? err.message : 'Impossible de lire le stockage iPhone.'
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setBrowseBusy(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [desktopBridge, activeNativeDevice?.id, activeNativeDevice?.status]);
 
   const openNativePath = async (device: DesktopIphoneDevice, nextPath: string) => {
     if (!desktopBridge) return;
-    setNativeBusy(true);
-    setNativeError(null);
+    setBrowseBusy(true);
+    setBrowseError(null);
     try {
       const entries = await desktopBridge.listIphoneDirectory(device.id, nextPath);
       setNativePath(nextPath);
       setNativeEntries(entries);
     } catch (err) {
-      setNativeError(err instanceof Error ? err.message : 'Impossible d’ouvrir ce dossier iPhone.');
+      setBrowseError(
+        err instanceof Error ? err.message : 'Impossible d’ouvrir ce dossier iPhone.'
+      );
     } finally {
-      setNativeBusy(false);
+      setBrowseBusy(false);
     }
   };
 
   const handleCopyNativeItem = async (entry: DesktopFsEntry) => {
     if (!desktopBridge || !activeNativeDevice) return;
-    setNativeBusy(true);
-    setNativeError(null);
-    setNativeStatus(`Copie de « ${entry.name} » vers votre PC...`);
+    setBrowseBusy(true);
+    setBrowseError(null);
+    setBrowseStatus(`Copie de « ${entry.name} » vers votre PC...`);
     try {
       const outPath = await desktopBridge.copyFromIphoneToPc(
         activeNativeDevice.id,
         entry.path,
         nativeDestDir || undefined
       );
-      setNativeStatus(`Copié sur votre PC : ${outPath}`);
+      setBrowseStatus(`Copié : ${outPath}`);
     } catch (err) {
-      setNativeError(err instanceof Error ? err.message : 'Échec de la copie vers le PC.');
-      setNativeStatus(null);
+      setBrowseError(err instanceof Error ? err.message : 'Échec de la copie vers le PC.');
+      setBrowseStatus(null);
     } finally {
-      setNativeBusy(false);
+      setBrowseBusy(false);
     }
   };
 
-  const handlePickNativeDestDir = async () => {
-    if (!desktopBridge) return;
-    const picked = await desktopBridge.pickPcDirectory();
-    if (picked) {
-      setNativeDestDir(picked);
+  const handlePickPcFolder = async () => {
+    if (desktopBridge) {
+      await onPickNativePcDir();
+      return;
     }
+    await onMountPcDirectory();
   };
 
-  const copyCommand = (id: string, cmd: string) => {
-    navigator.clipboard?.writeText(cmd).catch(() => {});
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 1600);
-  };
+  const isNativeReady = Boolean(activeNativeDevice && activeNativeDevice.status === 'ready');
+  const isNativeLocked = Boolean(activeNativeDevice && activeNativeDevice.status === 'locked');
+  const isIphoneDetected = Boolean(activeNativeDevice || usbDevice || mountedIphoneDirName);
+  const isIphoneReady = Boolean(isNativeReady || usbDevice || mountedIphoneDirName);
+  const isPcLinked = Boolean(nativeDestDir || mountedPcDirName);
+  const isReadyToTransfer = isIphoneReady && isPcLinked;
 
-  const windowsCommands = [
-    {
-      id: 'win_store',
-      label: '1. Installer le pilote USB-C officiel Apple (Appareils Apple via winget)',
-      cmd: 'winget install --id 9NP83LWLPZ9K --source msstore',
-    },
-    {
-      id: 'win_detect',
-      label: '2. Vérifier que l’iPhone est reconnu en USB-C (VID 0x05AC)',
-      cmd: 'Get-PnpDevice | Where-Object { $_.InstanceId -match "VID_05AC" } | Format-Table Status, FriendlyName',
-    },
-    {
-      id: 'win_backup',
-      label: '3. Accéder au dossier local des sauvegardes / exports Windows',
-      cmd: 'explorer "$env:USERPROFILE\\Apple\\MobileSync\\Backup"',
-    },
+  const displayDeviceName =
+    activeNativeDevice?.name || usbDevice?.productName || mountedIphoneDirName || null;
+  const displayVidPid = activeNativeDevice
+    ? `Apple Inc. · VID ${activeNativeDevice.vendorId || '0x05AC'}${
+        activeNativeDevice.productId ? ` · PID ${activeNativeDevice.productId}` : ''
+      }`
+    : usbDevice
+      ? `${usbDevice.manufacturerName} · VID ${usbDevice.vendorHex} · PID ${usbDevice.productHex}`
+      : 'Apple Inc. · VID 0x05AC';
+  const displayDeviceProtocol = activeNativeDevice
+    ? activeNativeDevice.backend === 'wpd'
+      ? 'USB-C · Windows WPD natif'
+      : activeNativeDevice.backend === 'usb_pnp'
+        ? 'USB-C · En attente d’autorisation iOS'
+        : 'USB-C · AFC natif'
+    : usbDevice
+      ? `USB ${usbDevice.usbVersion}`
+      : 'USB 3.2';
+  const displayPcPath =
+    nativeDestDir ||
+    (mountedPcDirName ? `PC\\${mountedPcDirName}` : 'OpenFS-iPhone-Sync');
+
+  const steps = [
+    { num: 1, label: '1. iPhone détecté', done: isIphoneDetected },
+    { num: 2, label: '2. Dossier PC monté', done: isPcLinked },
+    { num: 3, label: '3. Prêt à transférer', done: isReadyToTransfer },
   ];
 
   return (
-    <div className="flex-1 overflow-y-auto bg-white dark:bg-slate-950 p-5 md:p-8">
-      <div className="max-w-5xl mx-auto space-y-8">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-5 border-b border-slate-200 dark:border-slate-800">
-          <div className="space-y-1">
-            <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-              Pont USB-C : iPhone vers Windows & Linux
-            </h1>
-            <p className="text-sm text-slate-600 dark:text-slate-400 max-w-2xl">
-              Connectez votre iPhone en USB-C sur un ordinateur non-Apple, détectez le périphérique via WebUSB et montez le stockage iPhone + votre dossier PC pour transférer librement dans les deux sens.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onOpenDualPaneExplorer}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Columns2 size={15} />
-            Ouvrir l’explorateur iPhone ↔ PC
-          </button>
-        </div>
+    <div className="flex-1 overflow-y-auto px-6 sm:px-10 py-8 sm:py-10">
+      <div className="max-w-4xl mx-auto space-y-9">
+        {/* Clean Page Title */}
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+          Pont USB-C
+        </h1>
 
-        {/* Native Electron Desktop Windows WPD / AFC Direct iPhone Browser */}
-        {desktopBridge && (
-          <section className="rounded-xl border border-blue-200 dark:border-blue-900/60 bg-blue-50/40 dark:bg-blue-950/20 p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                  <Smartphone size={16} className="text-blue-600 dark:text-blue-400" />
-                  Accès natif Windows WPD (Ce PC → Apple iPhone)
+        {/* Two Equal Minimal Cards matching Reference 01 */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Card 1: iPhone Status */}
+          <div className="rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 flex flex-col justify-between min-h-[248px]">
+            <div className="space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                  {isIphoneReady
+                    ? 'iPhone connecté'
+                    : isNativeLocked
+                      ? 'iPhone détecté'
+                      : 'iPhone USB-C'}
                 </h2>
-                <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                  Mode logiciel bureau actif : OpenFS lit directement votre iPhone en USB-C sans les limites du navigateur.
-                </p>
+                {isIphoneDetected && (
+                  <button
+                    type="button"
+                    disabled={nativeBusy}
+                    onClick={() => (desktopBridge ? onScanNativeIphone(false) : onDisconnectUsb())}
+                    className="text-xs font-medium text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 transition-colors inline-flex items-center gap-1"
+                  >
+                    {desktopBridge && nativeBusy && <RefreshCw size={11} className="animate-spin" />}
+                    {desktopBridge ? 'Actualiser' : 'Déconnecter'}
+                  </button>
+                )}
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={nativeBusy}
-                  onClick={scanNativeIphone}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 transition-colors whitespace-nowrap"
-                >
-                  <RefreshCw size={13} className={nativeBusy ? 'animate-spin' : ''} />
-                  {activeNativeDevice ? 'Actualiser l’iPhone' : 'Détecter l’iPhone (USB-C natif)'}
-                </button>
-                <button
-                  type="button"
-                  onClick={handlePickNativeDestDir}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
-                >
-                  <HardDrive size={13} />
-                  Dossier PC de sortie
-                </button>
-              </div>
-            </div>
 
-            {nativeDestDir && (
-              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-400 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2">
-                <span className="truncate">
-                  Destination PC : <code className="font-mono text-slate-900 dark:text-slate-100">{nativeDestDir}</code>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => desktopBridge.openInExplorer(nativeDestDir)}
-                  className="text-blue-600 dark:text-blue-400 font-medium hover:underline shrink-0"
-                >
-                  Ouvrir dans l’Explorateur
-                </button>
-              </div>
-            )}
+              {isIphoneDetected ? (
+                <div className="space-y-3">
+                  {isNativeLocked ? (
+                    <div className="inline-flex items-center px-3 py-1 rounded-md bg-amber-500 text-white text-xs font-medium">
+                      Déverrouillez l’iPhone
+                    </div>
+                  ) : (
+                    <div className="inline-flex items-center px-3 py-1 rounded-md bg-[#0F7659] text-white text-xs font-medium">
+                      USB-C actif
+                    </div>
+                  )}
 
-            {nativeStatus && (
-              <div className="text-xs font-medium text-emerald-700 dark:text-emerald-400">
-                {nativeStatus}
-              </div>
-            )}
-            {nativeError && (
-              <div className="text-xs font-medium text-red-600 dark:text-red-400">
-                {nativeError}
-              </div>
-            )}
-
-            {activeNativeDevice && (
-              <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 overflow-hidden">
-                <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    {nativePath && (
-                      <button
-                        type="button"
-                        disabled={nativeBusy}
-                        onClick={() => {
-                          const parts = nativePath.split('/').filter(Boolean);
-                          parts.pop();
-                          openNativePath(activeNativeDevice, parts.join('/'));
-                        }}
-                        className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700"
-                      >
-                        <ArrowLeft size={12} />
-                        Retour
-                      </button>
-                    )}
-                    <span className="text-xs font-mono text-slate-700 dark:text-slate-300 truncate">
-                      {activeNativeDevice.name}/{nativePath}
-                    </span>
+                  <div className="space-y-1.5 pt-1 text-sm text-slate-800 dark:text-slate-200">
+                    <div className="font-medium">{displayDeviceName || 'Apple iPhone'}</div>
+                    <div className="text-slate-600 dark:text-slate-400">{displayVidPid}</div>
+                    <div className="text-slate-600 dark:text-slate-400 tabular-nums">
+                      {displayDeviceProtocol}
+                    </div>
                   </div>
+
+                  {isNativeLocked && activeNativeDevice?.hint && (
+                    <p className="text-xs text-amber-700 dark:text-amber-300 leading-relaxed pt-1">
+                      {activeNativeDevice.hint}
+                    </p>
+                  )}
+
                   {nativeDevices.length > 1 && (
-                    <span className="text-xs text-slate-500">
-                      {nativeDevices.length} appareils détectés
-                    </span>
+                    <div className="pt-1 flex flex-wrap gap-1.5">
+                      {nativeDevices.map((dev) => (
+                        <button
+                          key={dev.id}
+                          type="button"
+                          onClick={() => onSelectNativeDevice(dev)}
+                          className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+                            activeNativeDevice?.id === dev.id
+                              ? 'border-[#1A65C7] bg-blue-50 text-[#1A65C7] dark:bg-blue-950/40 dark:text-blue-300'
+                              : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          {dev.name}
+                        </button>
+                      ))}
+                    </div>
                   )}
                 </div>
+              ) : (
+                <div className="space-y-2.5 text-sm text-slate-600 dark:text-slate-400">
+                  <p className="leading-relaxed">
+                    Branchez votre iPhone en USB-C, déverrouillez l’écran et validez « Faire
+                    confiance à cet ordinateur ».
+                  </p>
+                  {(nativeError || usbError) && (
+                    <p className="text-xs text-red-600 dark:text-red-400 leading-relaxed">
+                      {nativeError || usbError}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
 
-                {nativeEntries.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                    Dossier vide.
-                  </div>
-                ) : (
-                  <div className="divide-y divide-slate-100 dark:divide-slate-800/80 max-h-80 overflow-y-auto">
-                    {nativeEntries.map((entry) => (
-                      <div
-                        key={entry.path}
-                        className="px-4 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-slate-900/40"
+            {!isIphoneDetected && (
+              <div className="pt-5 space-y-2">
+                <button
+                  type="button"
+                  disabled={nativeBusy || (!desktopBridge && !webUsbOk)}
+                  onClick={() => (desktopBridge ? onScanNativeIphone(false) : onConnectWebUsb(true))}
+                  className="w-full py-2.5 px-4 rounded-lg bg-[#1A65C7] hover:bg-[#1557B0] disabled:opacity-50 text-white text-sm font-medium transition-colors inline-flex items-center justify-center gap-2"
+                >
+                  {nativeBusy && <RefreshCw size={14} className="animate-spin" />}
+                  {nativeBusy ? 'Recherche en cours...' : 'Détecter l’iPhone'}
+                </button>
+                {!desktopBridge && (
+                  <div className="flex items-center justify-between gap-2 pt-0.5">
+                    {webUsbOk && (
+                      <button
+                        type="button"
+                        onClick={() => onConnectWebUsb(false)}
+                        className="text-xs text-[#1A65C7] dark:text-blue-400 hover:underline py-1"
                       >
-                        <button
-                          type="button"
-                          disabled={entry.kind !== 'folder' || nativeBusy}
-                          onClick={() => {
-                            if (entry.kind === 'folder') {
-                              openNativePath(activeNativeDevice, entry.path);
-                            }
-                          }}
-                          className="flex items-center gap-2.5 min-w-0 text-left disabled:cursor-default"
-                        >
-                          {entry.kind === 'folder' ? (
-                            <Folder size={16} className="text-blue-600 dark:text-blue-400 shrink-0" />
-                          ) : (
-                            <FileIcon size={15} className="text-slate-400 shrink-0" />
-                          )}
-                          <span className="text-xs font-medium text-slate-900 dark:text-slate-100 truncate">
-                            {entry.name}
-                          </span>
-                          {entry.kind === 'file' && entry.size > 0 && (
-                            <span className="text-[11px] font-mono text-slate-400 shrink-0">
-                              {formatBytes(entry.size)}
-                            </span>
-                          )}
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={nativeBusy}
-                          onClick={() => handleCopyNativeItem(entry)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 shrink-0"
-                        >
-                          <Download size={12} />
-                          Copier vers PC
-                        </button>
-                      </div>
-                    ))}
+                        Tous les ports USB
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={onEnableDemoUsb}
+                      className="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors py-1 ml-auto"
+                    >
+                      Aperçu sans iPhone
+                    </button>
                   </div>
                 )}
               </div>
             )}
-          </section>
-        )}
+          </div>
 
-        {/* Live USB-C Connection & Mount Cards */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-          {/* Card 1: WebUSB Hardware Detection */}
-          <div className="p-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 flex flex-col justify-between gap-4">
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
-                  1. Connexion USB-C directe
-                </span>
-                <Usb size={16} className={usbDevice ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'} />
-              </div>
-
-              {usbDevice ? (
-                <div className="space-y-1">
-                  <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    {usbDevice.productName}
-                  </div>
-                  <div className="text-xs font-mono tabular-nums text-slate-600 dark:text-slate-400">
-                    {usbDevice.manufacturerName} · {usbDevice.vendorHex}:{usbDevice.productHex} · USB {usbDevice.usbVersion}
-                  </div>
-                  <div className="text-xs text-emerald-700 dark:text-emerald-400 font-medium pt-0.5">
-                    {usbDevice.mode === 'simulated'
-                      ? 'Mode aperçu USB-C actif (démonstration)'
-                      : 'Périphérique Apple détecté sur le port USB-C'}
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    Aucun iPhone connecté
-                  </div>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                    Branchez votre iPhone en USB-C, déverrouillez-le et lancez la détection WebUSB (Chrome, Edge, Brave).
-                  </p>
-                </div>
-              )}
-
-              {usbError && (
-                <p className="text-xs text-red-600 dark:text-red-400 pt-1 leading-relaxed">
-                  {usbError}
-                </p>
-              )}
-            </div>
-
-            <div className="flex flex-col gap-2">
-              {!usbDevice ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => onConnectWebUsb(true)}
-                    disabled={!webUsbOk}
-                    className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-45 transition-colors whitespace-nowrap"
-                  >
-                    <Usb size={14} />
-                    {webUsbOk ? 'Connecter l’iPhone en USB-C' : 'WebUSB indisponible sur ce navigateur'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onEnableDemoUsb}
-                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors whitespace-nowrap"
-                  >
-                    <Play size={13} />
-                    Tester sans iPhone branché
-                  </button>
-                </>
-              ) : (
+          {/* Card 2: Linked PC Folder */}
+          <div className="rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 flex flex-col justify-between min-h-[248px]">
+            <div className="space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                  Dossier PC lié
+                </h2>
                 <button
                   type="button"
-                  onClick={onDisconnectUsb}
-                  className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors whitespace-nowrap"
+                  onClick={handlePickPcFolder}
+                  className="text-xs font-medium text-[#1A65C7] dark:text-blue-400 hover:underline shrink-0"
                 >
-                  <Unplug size={14} />
-                  Déconnecter la session USB
+                  {isPcLinked ? 'Changer' : 'Choisir'}
                 </button>
-              )}
-            </div>
-          </div>
+              </div>
 
-          {/* Card 2: Mount iPhone Volume */}
-          <div className="p-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 flex flex-col justify-between gap-4">
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
-                  2. Volume iPhone (ifuse / DCIM)
+              <div className="text-sm text-slate-800 dark:text-slate-200 break-all leading-relaxed">
+                {displayPcPath}
+              </div>
+            </div>
+
+            <div className="pt-6 space-y-3.5">
+              <div className="flex items-center justify-between gap-2 text-sm text-slate-700 dark:text-slate-300">
+                <span>
+                  {isPcLinked
+                    ? 'Écriture directe sur le disque activée'
+                    : 'Dossier local prêt pour les transferts'}
                 </span>
-                <Smartphone size={16} className={mountedIphoneDirName ? 'text-blue-600 dark:text-blue-400' : 'text-slate-400'} />
+                {desktopBridge && nativeDestDir && (
+                  <button
+                    type="button"
+                    onClick={() => desktopBridge.openInExplorer(nativeDestDir)}
+                    className="text-xs font-medium text-[#1A65C7] dark:text-blue-400 hover:underline shrink-0"
+                  >
+                    Ouvrir
+                  </button>
+                )}
               </div>
 
-              <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                {mountedIphoneDirName ? `Monté : ${mountedIphoneDirName}` : 'Monter le stockage iPhone'}
-              </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                {desktopBridge
-                  ? 'Utilisez le bloc « Accès natif Windows WPD » ci-dessus pour ouvrir directement Ce PC → Apple iPhone, ou montez un dossier local.'
-                  : 'Sous Linux, sélectionnez ~/iPhone-USB (ifuse). Dans un navigateur Windows, Chrome masque « Ce PC → Apple iPhone » (MTP) : glissez-déposez vos fichiers depuis l’Explorateur Windows ou utilisez la version .exe native.'}
-              </p>
+              <button
+                type="button"
+                onClick={onOpenDualPaneExplorer}
+                className="w-full py-2.5 px-4 rounded-lg bg-[#1A65C7] hover:bg-[#1557B0] text-white text-sm font-medium transition-colors"
+              >
+                Ouvrir le double panneau
+              </button>
             </div>
-
-            <button
-              type="button"
-              onClick={onMountIphoneVolume}
-              className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-medium rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white transition-colors whitespace-nowrap"
-            >
-              <FolderOpen size={14} />
-              {mountedIphoneDirName ? 'Changer le dossier iPhone' : 'Monter le volume iPhone'}
-            </button>
-          </div>
-
-          {/* Card 3: Mount PC Destination Folder */}
-          <div className="p-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 flex flex-col justify-between gap-4">
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
-                  3. Dossier PC (Windows / Linux)
-                </span>
-                <Laptop size={16} className={mountedPcDirName ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'} />
-              </div>
-
-              <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                {mountedPcDirName ? `Lié en direct : ${mountedPcDirName}` : 'Lier un dossier du disque dur'}
-              </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                Choisissez un dossier réel de votre PC : les fichiers copiés depuis l’iPhone y seront écrits directement sur votre disque dur.
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={onMountPcDirectory}
-              className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors whitespace-nowrap"
-            >
-              <HardDrive size={14} />
-              {mountedPcDirName ? 'Changer le dossier PC' : 'Monter un dossier PC'}
-            </button>
           </div>
         </div>
 
-        {/* Connected USB Device Hardware Descriptors Table */}
-        {usbDevice && (
-          <section className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                Descripteurs matériels USB-C détectés
-              </h2>
-              <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
-                S/N : {usbDevice.serialNumber}
-              </span>
-            </div>
-
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 text-slate-500 dark:text-slate-400 font-medium">
-                    <th className="py-2.5 px-4">Interface</th>
-                    <th className="py-2.5 px-4">Protocole iOS / USB</th>
-                    <th className="py-2.5 px-4 text-right">Classe / Sous-classe</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70">
-                  {usbDevice.interfaces.length > 0 ? (
-                    usbDevice.interfaces.map((iface) => (
-                      <tr key={iface.interfaceNumber}>
-                        <td className="py-2.5 px-4 font-mono tabular-nums text-slate-700 dark:text-slate-300">
-                          #{iface.interfaceNumber}
-                        </td>
-                        <td className="py-2.5 px-4 font-medium text-slate-900 dark:text-slate-100">
-                          {iface.label}
-                        </td>
-                        <td className="py-2.5 px-4 text-right font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                          0x{iface.classCode.toString(16).toUpperCase().padStart(2, '0')} / 0x
-                          {iface.subclassCode.toString(16).toUpperCase().padStart(2, '0')}
-                        </td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={3} className="py-3 px-4 text-slate-500 dark:text-slate-400">
-                        Périphérique détecté ({usbDevice.vendorHex}:{usbDevice.productHex}). Les interfaces bas niveau sont gérées par le pilote système (Apple Mobile Device).
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
-
-        {/* Native OS Setup Guide & Direct Windows Installer */}
-        <section className="space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                Débloquer l’accès complet sur PC Windows 10 / 11
-              </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Contrairement à Android (MTP), iOS utilise le protocole Apple sur USB-C. Utilisez l’application Windows native gratuite ci-dessous pour parcourir tout l’iPhone en un clic.
-              </p>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/40 p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
-              <div className="flex items-center gap-2.5">
-                <Terminal size={17} className="text-blue-600 dark:text-blue-400 shrink-0" />
-                <div>
-                  <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    Installeur natif Windows 10 / 11 (.exe)
-                  </div>
-                  <div className="text-xs text-slate-500 dark:text-slate-400">
-                    Gratuit · Installe OpenFS sur le Bureau avec pont USB-C Windows WPD intégré.
-                  </div>
-                </div>
+        {/* Clean Horizontal 3-Step Status Stepper matching Reference 01 */}
+        <div className="pt-2 flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-3">
+          {steps.map((step, index) => (
+            <div
+              key={step.num}
+              className={`flex items-center gap-3 ${index < steps.length - 1 ? 'sm:flex-1' : ''}`}
+            >
+              <div className="flex items-center gap-2.5 shrink-0">
+                <span
+                  className={`w-6 h-6 rounded-full flex items-center justify-center transition-colors shrink-0 ${
+                    step.done
+                      ? 'bg-[#1A65C7] text-white'
+                      : 'border border-slate-300 dark:border-slate-700 text-slate-400 dark:text-slate-500'
+                  }`}
+                >
+                  <Check size={13} strokeWidth={2.5} />
+                </span>
+                <span
+                  className={`text-sm whitespace-nowrap ${
+                    step.done
+                      ? 'text-slate-900 dark:text-slate-100 font-medium'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  {step.label}
+                </span>
               </div>
 
-              <a
-                href={windowsExeUrl}
-                download={windowsExeFilename}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
-              >
-                <Download size={14} />
-                Télécharger pour Windows (.exe)
-              </a>
+              {index < steps.length - 1 && (
+                <div
+                  aria-hidden="true"
+                  className={`hidden sm:block h-[2px] flex-1 rounded-full transition-colors ${
+                    step.done
+                      ? 'bg-[#1A65C7]'
+                      : 'bg-slate-200 dark:bg-slate-800'
+                  }`}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Native Windows WPD Live iPhone Quick Browser (shown inside .exe once unlocked) */}
+        {desktopBridge && activeNativeDevice && activeNativeDevice.status === 'ready' && (
+          <section className="pt-2 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                {nativePath && (
+                  <button
+                    type="button"
+                    disabled={browseBusy}
+                    onClick={() => {
+                      const parts = nativePath.split('/').filter(Boolean);
+                      parts.pop();
+                      openNativePath(activeNativeDevice, parts.join('/'));
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                  >
+                    <ArrowLeft size={13} />
+                    Retour
+                  </button>
+                )}
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
+                  {activeNativeDevice.name}
+                  {nativePath ? ` · /${nativePath}` : ''}
+                </h3>
+              </div>
+
+              {browseBusy && <RefreshCw size={13} className="animate-spin text-slate-400 shrink-0" />}
             </div>
 
-            <div className="space-y-3">
-              {windowsCommands.map((item) => (
-                <div key={item.id} className="space-y-1.5">
-                  <div className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                    {item.label}
-                  </div>
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 px-3 py-2">
-                    <code className="text-xs font-mono text-slate-800 dark:text-slate-200 overflow-x-auto whitespace-nowrap">
-                      {item.cmd}
-                    </code>
+            {browseStatus && (
+              <p className="text-xs text-emerald-700 dark:text-emerald-400">{browseStatus}</p>
+            )}
+            {browseError && (
+              <p className="text-xs text-red-600 dark:text-red-400">{browseError}</p>
+            )}
+
+            {nativeEntries.length === 0 && !browseBusy ? (
+              <div className="rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 p-8 text-center text-sm text-slate-500 dark:text-slate-400">
+                Ce dossier iPhone est vide.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {nativeEntries.map((entry) => (
+                  <div
+                    key={entry.path}
+                    className="rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 py-3 flex items-center justify-between gap-3 hover:border-slate-300 dark:hover:border-slate-700 transition-colors"
+                  >
                     <button
                       type="button"
-                      onClick={() => copyCommand(item.id, item.cmd)}
-                      className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-md text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
+                      disabled={entry.kind !== 'folder' || browseBusy}
+                      onClick={() => {
+                        if (entry.kind === 'folder') {
+                          openNativePath(activeNativeDevice, entry.path);
+                        }
+                      }}
+                      className="flex items-center gap-3 min-w-0 flex-1 text-left disabled:cursor-default"
                     >
-                      {copiedId === item.id ? <Check size={12} className="text-emerald-600" /> : <Copy size={12} />}
-                      {copiedId === item.id ? 'Copié' : 'Copier'}
+                      {entry.kind === 'folder' ? (
+                        <Folder
+                          size={20}
+                          className="text-[#1A65C7] fill-[#1A65C7]/90 dark:text-blue-400 dark:fill-blue-400/80 shrink-0"
+                        />
+                      ) : (
+                        <FileIcon size={18} className="text-slate-400 shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
+                          {entry.name}
+                        </div>
+                        {entry.kind === 'file' && entry.size > 0 && (
+                          <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+                            {formatBytes(entry.size)}
+                          </div>
+                        )}
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={browseBusy}
+                      onClick={() => handleCopyNativeItem(entry)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#1A65C7] text-white hover:bg-[#1557B0] disabled:opacity-50 transition-colors shrink-0"
+                    >
+                      <Download size={13} />
+                      Copier vers PC
                     </button>
                   </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Technical capabilities summary */}
-            <div className="pt-3 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-500 dark:text-slate-400">
-              <span className="inline-flex items-center gap-1.5">
-                <ShieldCheck size={14} className={webUsbOk ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-500'} />
-                WebUSB : {webUsbOk ? 'Actif' : 'Non supporté (utilisez Chrome / Edge)'}
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <ShieldCheck size={14} className={fsApiOk ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-500'} />
-                Écriture directe sur disque PC : {fsApiOk ? 'Disponible' : 'Mode import/téléchargement'}
-              </span>
-            </div>
-          </div>
-        </section>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
       </div>
     </div>
   );

@@ -106,6 +106,15 @@ function decodeUsbClass(classCode: number, subclass: number, protocol: number): 
   return `Classe 0x${classCode.toString(16).toUpperCase().padStart(2, '0')}`;
 }
 
+function describeAppleProduct(productId: number, fallbackName?: string): string {
+  if (fallbackName && fallbackName.trim()) return fallbackName.trim();
+  if (productId === 0x12a8) return 'Apple iPhone (USB-C / Lightning)';
+  if (productId === 0x12ab) return 'Apple iPad';
+  if (productId === 0x1281) return 'Apple iPhone (Mode Récupération)';
+  if (productId === 0x1227) return 'Apple iPhone (Mode DFU)';
+  return 'iPhone (USB-C)';
+}
+
 export function formatUsbDevice(device: WebUSBDevice): ConnectedUsbDeviceInfo {
   const interfaces: UsbInterfaceInfo[] = [];
   const activeConfig = device.configuration || device.configurations[0];
@@ -132,7 +141,10 @@ export function formatUsbDevice(device: WebUSBDevice): ConnectedUsbDeviceInfo {
     vendorHex: hex4(device.vendorId),
     productHex: hex4(device.productId),
     manufacturerName: device.manufacturerName || (device.vendorId === 0x05ac ? 'Apple Inc.' : 'Périphérique USB'),
-    productName: device.productName || (device.vendorId === 0x05ac ? 'iPhone (USB-C)' : 'Périphérique inconnu'),
+    productName:
+      device.vendorId === 0x05ac
+        ? describeAppleProduct(device.productId, device.productName)
+        : device.productName || 'Périphérique USB',
     serialNumber: device.serialNumber || 'Masqué par le pilote OS',
     usbVersion: `${device.usbVersionMajor}.${device.usbVersionMinor}`,
     opened: device.opened,
@@ -156,17 +168,30 @@ export async function getAuthorizedUsbDevices(): Promise<ConnectedUsbDeviceInfo[
 export async function requestAppleUsbDevice(appleOnly = true): Promise<ConnectedUsbDeviceInfo | null> {
   const usb = getUsbManager();
   if (!usb) {
-    throw new Error('WebUSB n’est pas pris en charge par ce navigateur (utilisez Chrome, Edge ou Brave sur PC/Linux).');
+    throw new Error(
+      'Votre navigateur ne prend pas en charge WebUSB. Utilisez Chrome, Edge ou Brave, ou l’application Windows OpenFS (.exe).'
+    );
   }
-  const device = await usb.requestDevice({
-    filters: appleOnly ? [{ vendorId: 0x05ac }] : [],
-  });
+  let device: WebUSBDevice;
+  try {
+    device = await usb.requestDevice({
+      filters: appleOnly ? [{ vendorId: 0x05ac }] : [],
+    });
+  } catch (err) {
+    const e = err as Error;
+    if (e?.name === 'SecurityError') {
+      throw new Error(
+        'L’accès USB est bloqué dans cet aperçu intégré. Ouvrez le site dans un onglet Chrome/Edge direct ou utilisez l’application Windows OpenFS (.exe).'
+      );
+    }
+    throw err;
+  }
   try {
     if (!device.opened) {
       await device.open();
     }
   } catch {
-    // On Windows/Linux, OS drivers (Apple Mobile Device / usbmuxd) may hold an exclusive lock.
+    // On Windows/Linux, OS drivers (Apple Mobile Device / WPD / usbmuxd) hold an exclusive lock.
     // Even without open(), descriptor metadata is already readable and the device is detected!
   }
   return formatUsbDevice(device);

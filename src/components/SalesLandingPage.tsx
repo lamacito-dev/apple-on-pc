@@ -188,16 +188,16 @@ export function SalesLandingPage({
           {/* Zone 2: 4 concise single-line text nav links */}
           <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600 dark:text-slate-400">
             <a
-              href="#apercu"
-              className="hover:text-slate-900 dark:hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
-            >
-              Aperçu
-            </a>
-            <a
               href="#etapes"
               className="hover:text-slate-900 dark:hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
             >
               Étapes
+            </a>
+            <a
+              href="#apercu"
+              className="hover:text-slate-900 dark:hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
+            >
+              Aperçu
             </a>
             <a
               href="#comparatif"
@@ -336,106 +336,11 @@ export function SalesLandingPage({
           </div>
         </section>
 
-        {/* Interface Visual Gallery Section */}
+        {/* 4 Illustrated Steps Section */}
         <section
-          id="apercu"
+          id="etapes"
           className="border-t border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/35 py-20 lg:py-28"
         >
-          <div className="max-w-6xl mx-auto px-6 space-y-10">
-            <div className="max-w-2xl space-y-3">
-              <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                Aperçu de l’application
-              </p>
-              <h2
-                className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100"
-                style={{ textWrap: 'balance' }}
-              >
-                À quoi ressemble OpenFS sur votre ordinateur.
-              </h2>
-              <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 leading-relaxed">
-                Parcourez les trois écrans clés du logiciel : le double panneau iPhone ↔ PC, la
-                détection USB-C directe et la visionneuse avec inspecteur technique.
-              </p>
-            </div>
-
-            {/* Active Large UI Preview */}
-            <div className="max-w-3xl mx-auto space-y-4">
-              <div className="p-2 rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_20px_50px_-15px_rgba(15,23,42,0.14)] dark:shadow-[0_20px_50px_-15px_rgba(0,0,0,0.55)] ring-1 ring-slate-900/5 dark:ring-white/5">
-                <img
-                  src={activePreview.src}
-                  alt={activePreview.alt}
-                  referrerPolicy="no-referrer"
-                  className="w-full aspect-16/9 object-cover block rounded-xl border border-slate-200/70 dark:border-slate-800"
-                />
-              </div>
-
-              <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 pt-1 px-1">
-                <div className="flex items-baseline gap-2.5 shrink-0">
-                  <span className="text-xs font-mono font-semibold text-blue-600 dark:text-blue-400">
-                    {activePreview.step}
-                  </span>
-                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    {activePreview.title}
-                  </h3>
-                </div>
-                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 max-w-xl">
-                  {activePreview.description}
-                </p>
-              </div>
-            </div>
-
-            {/* 3-Card Thumbnail Selector Strip */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-              {INTERFACE_PREVIEWS.map((preview, idx) => {
-                const selected = idx === activePreviewIdx;
-                return (
-                  <button
-                    key={preview.id}
-                    type="button"
-                    onClick={() => setActivePreviewIdx(idx)}
-                    aria-pressed={selected}
-                    className={`group text-left rounded-xl border p-3 transition-colors ${
-                      selected
-                        ? 'border-blue-600 dark:border-blue-500 bg-white dark:bg-slate-950 ring-1 ring-blue-600/20'
-                        : 'border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-950/60 hover:border-slate-300 dark:hover:border-slate-700'
-                    }`}
-                  >
-                    <div className="overflow-hidden rounded-lg border border-slate-200/80 dark:border-slate-800 mb-3 bg-slate-100 dark:bg-slate-900">
-                      <img
-                        src={preview.src}
-                        alt={preview.alt}
-                        referrerPolicy="no-referrer"
-                        className="w-full aspect-16/9 object-cover group-hover:scale-[1.02] transition-transform duration-300"
-                      />
-                    </div>
-                    <div className="space-y-1 px-1">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`text-xs font-mono font-semibold ${
-                            selected
-                              ? 'text-blue-600 dark:text-blue-400'
-                              : 'text-slate-400 dark:text-slate-500'
-                          }`}
-                        >
-                          {preview.step}
-                        </span>
-                        <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                          {preview.title}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                        {preview.subtitle}
-                      </p>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </section>
-
-        {/* 4 Illustrated Steps Section */}
-        <section id="etapes" className="border-t border-slate-200 dark:border-slate-800 py-20 lg:py-28">
           <div className="max-w-6xl mx-auto px-6 space-y-20">
             <div className="max-w-2xl space-y-3">
               <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
@@ -472,8 +377,7 @@ export function SalesLandingPage({
                 </h3>
                 <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 leading-relaxed">
                   Reliez votre iPhone à un port USB-C (ou USB-A avec adaptateur) de votre PC Windows
-                  ou Linux à l’aide d’un câble de données. Déverrouillez l’écran de l’iPhone et
-                  appuyez sur{' '}
+                  à l’aide d’un câble de données. Déverrouillez l’écran de l’iPhone et appuyez sur{' '}
                   <strong className="font-semibold text-slate-900 dark:text-slate-100">
                     Faire confiance à cet ordinateur
                   </strong>{' '}
@@ -519,7 +423,7 @@ export function SalesLandingPage({
               </div>
 
               <div className="lg:col-span-6 order-1 lg:order-2">
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 p-6 space-y-5">
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-6 space-y-5">
                   <div className="flex items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
                     <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
                       <Terminal size={16} className="text-blue-600 dark:text-blue-400" />
@@ -616,7 +520,7 @@ export function SalesLandingPage({
                   04. Transfert direct
                 </div>
                 <h3 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-                  Copiez en un geste vers votre disque dur PC ou Linux
+                  Copiez en un geste vers votre disque dur PC
                 </h3>
                 <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 leading-relaxed">
                   OpenFS affiche votre{' '}
@@ -625,7 +529,7 @@ export function SalesLandingPage({
                   </strong>{' '}
                   et votre{' '}
                   <strong className="font-semibold text-slate-900 dark:text-slate-100">
-                    dossier PC / Linux à droite
+                    dossier PC Windows à droite
                   </strong>
                   . Liez un vrai dossier de votre ordinateur (Bureau, Disque D:, SSD externe) :
                   chaque fichier glissé-déposé ou copié depuis l’iPhone est écrit immédiatement sur
@@ -649,6 +553,104 @@ export function SalesLandingPage({
                   className="aspect-4/3"
                 />
               </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Interface Visual Gallery Section */}
+        <section
+          id="apercu"
+          className="border-t border-slate-200 dark:border-slate-800 py-20 lg:py-28"
+        >
+          <div className="max-w-6xl mx-auto px-6 space-y-10">
+            <div className="max-w-2xl space-y-3">
+              <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
+                Aperçu de l’application
+              </p>
+              <h2
+                className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100"
+                style={{ textWrap: 'balance' }}
+              >
+                À quoi ressemble OpenFS sur votre ordinateur.
+              </h2>
+              <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 leading-relaxed">
+                Parcourez les trois écrans clés du logiciel : le double panneau iPhone ↔ PC, la
+                détection USB-C directe et la visionneuse avec inspecteur technique.
+              </p>
+            </div>
+
+            {/* Active Large UI Preview */}
+            <div className="max-w-3xl mx-auto space-y-4">
+              <div className="p-2 rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-[0_20px_50px_-15px_rgba(15,23,42,0.14)] dark:shadow-[0_20px_50px_-15px_rgba(0,0,0,0.55)] ring-1 ring-slate-900/5 dark:ring-white/5">
+                <img
+                  src={activePreview.src}
+                  alt={activePreview.alt}
+                  referrerPolicy="no-referrer"
+                  className="w-full aspect-16/9 object-cover block rounded-xl border border-slate-200/70 dark:border-slate-800"
+                />
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 pt-1 px-1">
+                <div className="flex items-baseline gap-2.5 shrink-0">
+                  <span className="text-xs font-mono font-semibold text-blue-600 dark:text-blue-400">
+                    {activePreview.step}
+                  </span>
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    {activePreview.title}
+                  </h3>
+                </div>
+                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 max-w-xl">
+                  {activePreview.description}
+                </p>
+              </div>
+            </div>
+
+            {/* 3-Card Thumbnail Selector Strip */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {INTERFACE_PREVIEWS.map((preview, idx) => {
+                const selected = idx === activePreviewIdx;
+                return (
+                  <button
+                    key={preview.id}
+                    type="button"
+                    onClick={() => setActivePreviewIdx(idx)}
+                    aria-pressed={selected}
+                    className={`group text-left rounded-xl border p-3 transition-colors ${
+                      selected
+                        ? 'border-blue-600 dark:border-blue-500 bg-white dark:bg-slate-950 ring-1 ring-blue-600/20'
+                        : 'border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/60 hover:border-slate-300 dark:hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="overflow-hidden rounded-lg border border-slate-200/80 dark:border-slate-800 mb-3 bg-slate-100 dark:bg-slate-900">
+                      <img
+                        src={preview.src}
+                        alt={preview.alt}
+                        referrerPolicy="no-referrer"
+                        className="w-full aspect-16/9 object-cover group-hover:scale-[1.02] transition-transform duration-300"
+                      />
+                    </div>
+                    <div className="space-y-1 px-1">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`text-xs font-mono font-semibold ${
+                            selected
+                              ? 'text-blue-600 dark:text-blue-400'
+                              : 'text-slate-400 dark:text-slate-500'
+                          }`}
+                        >
+                          {preview.step}
+                        </span>
+                        <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {preview.title}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                        {preview.subtitle}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </section>
@@ -818,11 +820,11 @@ export function SalesLandingPage({
           </div>
 
           <div className="flex items-center gap-5">
-            <a href="#apercu" className="hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
-              Aperçu
-            </a>
             <a href="#etapes" className="hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
               Étapes
+            </a>
+            <a href="#apercu" className="hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
+              Aperçu
             </a>
             <a href="#comparatif" className="hover:text-slate-900 dark:hover:text-slate-100 transition-colors">
               Avant / Après

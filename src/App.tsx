@@ -6,27 +6,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import JSZip from 'jszip';
 import {
-  Archive,
-  ArrowLeftRight,
-  ClipboardPaste,
-  Columns2,
-  Copy,
-  Download,
   Eye,
   EyeOff,
   FilePlus2,
   FolderPlus,
-  FolderUp,
   HardDrive,
-  Info,
-  LayoutGrid,
-  List,
   Menu,
-  PieChart,
-  RotateCcw,
-  Scissors,
   Search,
-  Trash2,
   Upload,
   Usb,
   X,
@@ -57,6 +43,7 @@ import {
   downloadBlob,
   generateId,
   getDescendantIds,
+  getPosixPath,
   inferMimeType,
   readDroppedItems,
   resolvePosixPath,
@@ -72,25 +59,16 @@ import {
   type ConnectedUsbDeviceInfo,
   type WritableDirectoryHandle,
 } from './lib/webUsbBridge';
+import { getDesktopBridge, type DesktopIphoneDevice } from './lib/desktopBridge';
 import { Sidebar } from './components/Sidebar';
 import { FilePane } from './components/FilePane';
-import { InspectorPanel } from './components/InspectorPanel';
 import { FileViewerModal } from './components/FileViewerModal';
+import { NativeDualPaneView } from './components/NativeDualPaneView';
 import { StorageAnalyzer } from './components/StorageAnalyzer';
 import { UsbBridgeView } from './components/UsbBridgeView';
 import { ConfirmDeleteDialog, InputDialog } from './components/Dialogs';
-import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SalesLandingPage } from './components/SalesLandingPage';
-
-const CATEGORIES: { id: FileCategory; label: string }[] = [
-  { id: 'all', label: 'Tous' },
-  { id: 'image', label: 'Images' },
-  { id: 'document', label: 'Documents' },
-  { id: 'code', label: 'Code & Plist' },
-  { id: 'archive', label: 'Archives' },
-  { id: 'audio', label: 'Audio' },
-];
 
 export default function App() {
   const [nodes, setNodes] = useState<FSNode[]>([]);
@@ -104,8 +82,11 @@ export default function App() {
     }
   });
 
+  const desktopBridge = getDesktopBridge();
+
   const [appSurface, setAppSurface] = useState<'site' | 'app'>(() => {
     if (typeof window === 'undefined') return 'site';
+    if (getDesktopBridge()) return 'app';
     const isStandalone =
       window.matchMedia('(display-mode: standalone)').matches ||
       (window.navigator as unknown as { standalone?: boolean }).standalone === true;
@@ -114,12 +95,21 @@ export default function App() {
   });
 
   const [activeSection, setActiveSection] = useState<SidebarSection>(() => {
-    if (typeof window !== 'undefined' && window.location.hash === '#app/usb') {
+    if (typeof window !== 'undefined' && (window.location.hash === '#app/usb' || getDesktopBridge())) {
       return 'usb_bridge';
     }
     return 'browser';
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Real Native Electron Windows WPD / PnP USB State
+  const [nativeDevices, setNativeDevices] = useState<DesktopIphoneDevice[]>([]);
+  const [activeNativeDevice, setActiveNativeDevice] = useState<DesktopIphoneDevice | null>(null);
+  const [nativeDestDir, setNativeDestDir] = useState<string>('');
+  const [nativeBusy, setNativeBusy] = useState(false);
+  const [nativeError, setNativeError] = useState<string | null>(null);
+  const nativeScanInFlightRef = useRef(false);
+  const lastNativeSignatureRef = useRef<string>('');
 
   // Real WebUSB & OS Directory Mount State
   const [usbDevice, setUsbDevice] = useState<ConnectedUsbDeviceInfo | null>(null);
@@ -129,13 +119,13 @@ export default function App() {
   const pcDirHandleRef = useRef<WritableDirectoryHandle | null>(null);
   const iphoneDirHandleRef = useRef<WritableDirectoryHandle | null>(null);
 
-  // Dual-pane iPhone (USB-C) <-> Ordinateur (PC / Linux) enabled by default on desktop
+  // Dual-pane iPhone (USB-C) <-> Ordinateur (PC) enabled by default on desktop
   const [splitView, setSplitView] = useState(true);
   const [activePaneId, setActivePaneId] = useState<'primary' | 'secondary'>('primary');
   const [primaryPane, setPrimaryPane] = useState<PaneState>({
     id: 'primary',
-    folderId: 'root_internal',
-    history: ['root_internal'],
+    folderId: 'dir_100apple',
+    history: ['dir_100apple'],
     historyIndex: 0,
     selectedIds: [],
   });
@@ -148,16 +138,14 @@ export default function App() {
   });
 
   // View & Filtering
-  const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const [viewMode] = useState<ViewMode>('list');
   const [sortField, setSortField] = useState<SortField>('name');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [searchQuery, setSearchQuery] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<FileCategory>('all');
-  const [showHidden, setShowHidden] = useState(false);
+  const [categoryFilter] = useState<FileCategory>('all');
+  const [showHidden, setShowHidden] = useState(true);
 
-  // Inspector & Viewer
-  const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [mobileInspectorNode, setMobileInspectorNode] = useState<FSNode | null>(null);
+  // Inline File Viewer & Inspecteur
   const [viewerNodeId, setViewerNodeId] = useState<string | null>(null);
 
   // Clipboard (Copy / Cut / Paste)
@@ -334,6 +322,98 @@ export default function App() {
     };
   }, [pushToast]);
 
+  // Real Native Electron Windows WPD / PnP iPhone Detection (auto-scan on launch + 3s live polling)
+  const scanNativeIphone = useCallback(
+    async (silent = false) => {
+      const bridge = getDesktopBridge();
+      if (!bridge || nativeScanInFlightRef.current) return;
+      nativeScanInFlightRef.current = true;
+      if (!silent) {
+        setNativeBusy(true);
+        setNativeError(null);
+      }
+      try {
+        const devices = await bridge.listIphoneDevices();
+        setNativeDevices(devices);
+
+        const nextSig = devices.map((d) => `${d.id}|${d.status}`).join(';');
+        const prevSig = lastNativeSignatureRef.current;
+        lastNativeSignatureRef.current = nextSig;
+
+        if (devices.length === 0) {
+          setActiveNativeDevice(null);
+          if (!silent) {
+            setNativeError(
+              'Aucun iPhone détecté sur les ports USB. Branchez-le en USB-C, déverrouillez-le et validez « Faire confiance ».'
+            );
+          }
+        } else {
+          setNativeError(null);
+          setActiveNativeDevice((curr) => {
+            if (curr) {
+              const matched = devices.find(
+                (d) => d.id === curr.id || (d.serialNumber && d.serialNumber === curr.serialNumber)
+              );
+              if (matched) return matched;
+            }
+            return devices.find((d) => d.status === 'ready') || devices[0];
+          });
+
+          if (prevSig !== nextSig) {
+            const firstReady = devices.find((d) => d.status === 'ready');
+            if (firstReady) {
+              pushToast(`iPhone prêt en USB-C : ${firstReady.name}`, 'success');
+            } else if (!prevSig) {
+              pushToast(
+                `${devices[0].name} détecté — déverrouillez-le et validez « Autoriser »`,
+                'info'
+              );
+            }
+          }
+        }
+      } catch (err) {
+        if (!silent) {
+          setNativeError(
+            err instanceof Error ? err.message : 'Erreur de lecture USB-C native Windows.'
+          );
+        }
+      } finally {
+        nativeScanInFlightRef.current = false;
+        if (!silent) setNativeBusy(false);
+      }
+    },
+    [pushToast]
+  );
+
+  useEffect(() => {
+    const bridge = getDesktopBridge();
+    if (!bridge || appSurface !== 'app') return;
+
+    bridge
+      .getDefaultSyncDir()
+      .then((dir) => setNativeDestDir((curr) => curr || dir))
+      .catch(() => {});
+
+    scanNativeIphone(true);
+    const interval = window.setInterval(() => {
+      scanNativeIphone(true);
+    }, 3000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [appSurface, scanNativeIphone]);
+
+  const handlePickNativePcDir = useCallback(async () => {
+    const bridge = getDesktopBridge();
+    if (!bridge) return;
+    const picked = await bridge.pickPcDirectory();
+    if (picked) {
+      setNativeDestDir(picked);
+      pushToast(`Dossier PC lié : ${picked}`, 'success');
+    }
+  }, [pushToast]);
+
   const nodeMap = useMemo(() => {
     const map: Record<string, FSNode> = {};
     for (const n of nodes) {
@@ -469,10 +549,11 @@ export default function App() {
     } catch (err) {
       const msg = (err as Error)?.message || 'Impossible d’ouvrir le périphérique USB-C.';
       if ((err as Error)?.name === 'NotFoundError') {
-        // User cancelled or no Apple device matched filter
         setActiveSection('usb_bridge');
         setUsbError(
-          'Aucun iPhone sélectionné. Assurez-vous qu’il est branché en USB-C, déverrouillé et appairé, ou utilisez le pont Linux/Windows ci-dessous.'
+          appleOnly
+            ? 'Aucun iPhone sélectionné dans la fenêtre USB. Essayez « Tous les ports USB » ci-dessous, ou utilisez l’application Windows OpenFS (.exe) pour la détection native.'
+            : 'Aucun périphérique USB sélectionné.'
         );
       } else {
         setActiveSection('usb_bridge');
@@ -1382,21 +1463,27 @@ export default function App() {
     pushToast,
   ]);
 
-  // Transfer selected files between iPhone pane and PC pane
-  const handleSendToOtherPane = async (move: boolean) => {
-    if (!splitView || selectedNodes.length === 0) return;
-    const otherFolderId =
-      activePaneId === 'primary' ? secondaryPane.folderId : primaryPane.folderId;
-    const ids = selectedNodes.map((n) => n.id);
-    if (move) {
-      await handleMoveNodesToFolder(ids, otherFolderId);
-    } else {
-      await handleCopyNodesToFolder(ids, otherFolderId);
+  // Copy selected iPhone files straight to the right PC pane
+  const handleCopyIphoneSelectionToPc = async () => {
+    const ids = primaryPane.selectedIds;
+    if (ids.length === 0) {
+      pushToast('Sélectionnez un fichier dans le panneau iPhone à gauche', 'info');
+      return;
     }
+    await handleCopyNodesToFolder(ids, secondaryPane.folderId);
   };
 
-  const transferCopyLabel =
-    activePaneId === 'primary' ? 'Copier vers PC' : 'Envoyer vers iPhone';
+  const primaryDisplayPath = useMemo(() => {
+    const raw = getPosixPath(primaryPane.folderId, nodeMap);
+    return raw.replace(/^\/var\/mobile\/Media/, '').replace(/^\/var\/mobile/, '') || '/';
+  }, [primaryPane.folderId, nodeMap]);
+
+  const secondaryDisplayPath = useMemo(() => {
+    if (mountedPcDirName) return mountedPcDirName;
+    const folder = nodeMap[secondaryPane.folderId];
+    if (!folder || folder.id === 'root_pc') return 'OpenFS-iPhone-Sync';
+    return folder.name;
+  }, [secondaryPane.folderId, nodeMap, mountedPcDirName]);
 
   if (appSurface === 'site') {
     return (
@@ -1408,7 +1495,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-full flex overflow-hidden bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+    <div className="h-screen w-full flex overflow-hidden bg-[#F3F6FA] dark:bg-slate-950 text-slate-900 dark:text-slate-100">
       <input
         ref={fileInputRef}
         type="file"
@@ -1427,18 +1514,18 @@ export default function App() {
         className="hidden"
       />
 
-      {/* Left Sidebar */}
+      {/* Left 5-Item Sidebar matching all 3 OpenFS desktop references */}
       <Sidebar
         activeSection={activeSection}
         activeFolderId={activePane.folderId}
+        activePaneId={activePaneId}
         nodes={nodes}
         darkMode={darkMode}
         mobileOpen={mobileMenuOpen}
-        usbDevice={usbDevice}
-        mountedPcDirName={mountedPcDirName}
         onCloseMobile={() => setMobileMenuOpen(false)}
         onToggleDarkMode={() => setDarkMode((d) => !d)}
         onSelectFolder={(folderId, targetPane = 'primary') => {
+          setViewerNodeId(null);
           if (targetPane === 'secondary' && splitView) {
             setActivePaneId('secondary');
             navigatePane('secondary', folderId);
@@ -1448,423 +1535,197 @@ export default function App() {
           }
         }}
         onSelectSection={(sec) => {
+          setViewerNodeId(null);
           setActiveSection(sec);
           setSearchQuery('');
         }}
-        onConnectUsbClick={() => handleConnectWebUsb(true)}
-        onMountIphoneClick={handleMountIphoneVolume}
-        onMountPcClick={handleMountPcDirectory}
         onReturnToSite={handleReturnToSite}
       />
 
-      {/* Main Column */}
-      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
-        {/* Top Workspace Header */}
-        <header className="h-14 px-3 sm:px-5 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 flex items-center justify-between gap-4 shrink-0">
-          {/* Left: Mobile Menu + Live Search */}
-          <div className="flex items-center gap-2.5 flex-1 max-w-md min-w-0">
+      {/* Main Content Surface with clean Windows 11 rounded-tl framing */}
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden md:pt-2.5 md:pr-2.5 md:pb-2.5">
+        <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[#FBFDFF] dark:bg-slate-900/50 md:rounded-2xl md:border border-slate-200/80 dark:border-slate-800">
+          {/* Mobile menu trigger bar (small screens only) */}
+          <div className="md:hidden h-12 px-4 border-b border-slate-200/80 dark:border-slate-800 flex items-center justify-between shrink-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
-              aria-label="Ouvrir le menu des volumes"
-              className="md:hidden w-10 h-10 flex items-center justify-center rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+              aria-label="Ouvrir le menu"
+              className="w-9 h-9 -ml-2 flex items-center justify-center rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
             >
-              <Menu size={20} />
+              <Menu size={19} />
             </button>
-
-            <div className="relative flex-1 min-w-0">
-              <Search
-                size={15}
-                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-              />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => {
-                  setSearchQuery(e.target.value);
-                  if (activeSection === 'storage' || activeSection === 'usb_bridge') {
-                    setActiveSection('browser');
-                  }
-                }}
-                placeholder="Rechercher dans l'iPhone ou le PC..."
-                className="w-full pl-9 pr-8 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:bg-white dark:focus:bg-slate-950 focus:border-blue-600 transition-colors"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery('')}
-                  aria-label="Effacer la recherche"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
-                >
-                  <X size={14} />
-                </button>
-              )}
-            </div>
+            <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">OpenFS</span>
+            <div className="w-9" />
           </div>
 
-          {/* Right: Primary Actions */}
-          <div className="flex items-center gap-2 shrink-0 relative">
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setCreateMenuOpen((o) => !o)}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
-              >
-                <FolderPlus size={15} />
-                <span className="hidden sm:inline">Nouveau</span>
-              </button>
+          {/* Quiet Slim Utility Strip (only in file browser when viewer is closed) */}
+          {activeSection !== 'usb_bridge' && activeSection !== 'storage' && !viewerNode && (
+            <div className="h-12 px-6 border-b border-slate-200/70 dark:border-slate-800/80 flex items-center justify-between gap-3 shrink-0">
+              <div className="relative w-full max-w-xs min-w-0">
+                <Search
+                  size={14}
+                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Rechercher un fichier..."
+                  className="w-full pl-8 pr-7 py-1.5 text-xs rounded-lg border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-[#1A65C7] transition-colors"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    aria-label="Effacer la recherche"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
 
-              {createMenuOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-30"
-                    onClick={() => setCreateMenuOpen(false)}
-                  />
-                  <div className="absolute right-0 mt-1.5 w-56 z-40 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-lg py-1.5 text-xs">
+              {!(desktopBridge && activeSection === 'browser' && activeNativeDevice?.status === 'ready') && (
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowHidden((h) => !h)}
+                    title="Afficher ou masquer les fichiers cachés (.nomedia, .env)"
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                      showHidden
+                        ? 'text-[#1A65C7] dark:text-blue-400 bg-blue-50/80 dark:bg-blue-950/35'
+                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    {showHidden ? <Eye size={13} /> : <EyeOff size={13} />}
+                    <span className="hidden sm:inline">Fichiers cachés</span>
+                  </button>
+
+                  <div className="relative">
                     <button
                       type="button"
-                      onClick={() => {
-                        setCreateMenuOpen(false);
-                        setNewFolderOpen(true);
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                      onClick={() => setCreateMenuOpen((o) => !o)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200/90 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
                     >
-                      <FolderPlus size={15} className="text-blue-600 dark:text-blue-400" />
-                      Nouveau dossier
+                      <FolderPlus size={13} />
+                      <span>Nouveau</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCreateMenuOpen(false);
-                        setNewFileOpen(true);
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    >
-                      <FilePlus2 size={15} className="text-slate-500" />
-                      Nouveau fichier texte / code
-                    </button>
-                    <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCreateMenuOpen(false);
-                        fileInputRef.current?.click();
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    >
-                      <Upload size={15} className="text-slate-500" />
-                      Importer des fichiers
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCreateMenuOpen(false);
-                        handleMountIphoneVolume();
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
-                    >
-                      <FolderUp size={15} className="text-slate-500" />
-                      Monter un volume iPhone (ifuse)
-                    </button>
+
+                    {createMenuOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-30"
+                          onClick={() => setCreateMenuOpen(false)}
+                        />
+                        <div className="absolute right-0 mt-1.5 w-48 z-40 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-lg py-1.5 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCreateMenuOpen(false);
+                              setNewFolderOpen(true);
+                            }}
+                            className="w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                          >
+                            <FolderPlus size={14} className="text-[#1A65C7] dark:text-blue-400" />
+                            Nouveau dossier
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCreateMenuOpen(false);
+                              setNewFileOpen(true);
+                            }}
+                            className="w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                          >
+                            <FilePlus2 size={14} className="text-slate-500" />
+                            Nouveau fichier
+                          </button>
+                          <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCreateMenuOpen(false);
+                              fileInputRef.current?.click();
+                            }}
+                            className="w-full flex items-center gap-2.5 px-3.5 py-2 text-left text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+                          >
+                            <Upload size={14} className="text-slate-500" />
+                            Importer des fichiers
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
-                </>
-              )}
-            </div>
-
-            <button
-              type="button"
-              onClick={() =>
-                usbDevice ? setActiveSection('usb_bridge') : handleConnectWebUsb(true)
-              }
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
-            >
-              <Usb size={14} />
-              {usbDevice ? 'Pont USB-C' : 'Connecter USB-C'}
-            </button>
-          </div>
-        </header>
-
-        {/* Secondary Workspace Toolbar */}
-        {activeSection !== 'storage' && activeSection !== 'usb_bridge' && (
-          <div className="px-3 sm:px-5 py-2 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 flex items-center justify-between gap-3 overflow-x-auto shrink-0">
-            {/* Category segmented filter */}
-            <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-200/70 dark:bg-slate-800/80 shrink-0">
-              {CATEGORIES.map((cat) => (
-                <button
-                  key={cat.id}
-                  type="button"
-                  onClick={() => setCategoryFilter(cat.id)}
-                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                    categoryFilter === cat.id
-                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                  }`}
-                >
-                  {cat.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Power-user toggles */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              <div className="md:hidden">
-                <PWAInstallButton variant="compact" />
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setShowHidden((h) => !h)}
-                title="Afficher ou masquer les fichiers cachés (.env, .nomedia, .system_cache)"
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
-                  showHidden
-                    ? 'border-blue-600/40 bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
-                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                }`}
-              >
-                {showHidden ? <Eye size={14} /> : <EyeOff size={14} />}
-                <span className="hidden lg:inline">Fichiers cachés</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setSplitView((s) => !s);
-                  setActiveSection('browser');
-                }}
-                title="Afficher iPhone USB-C et PC / Linux côte à côte"
-                className={`hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
-                  splitView
-                    ? 'border-blue-600/40 bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
-                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                }`}
-              >
-                <Columns2 size={14} />
-                iPhone ↔ PC
-              </button>
-
-              <div className="flex items-center p-0.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('list')}
-                  title="Vue liste détaillée"
-                  aria-label="Vue liste"
-                  className={`p-1.5 rounded-md transition-colors ${
-                    viewMode === 'list'
-                      ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100'
-                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                  }`}
-                >
-                  <List size={14} />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('grid')}
-                  title="Vue grille"
-                  aria-label="Vue grille"
-                  className={`p-1.5 rounded-md transition-colors ${
-                    viewMode === 'grid'
-                      ? 'bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100'
-                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                  }`}
-                >
-                  <LayoutGrid size={14} />
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setInspectorOpen((o) => !o)}
-                title="Panneau Propriétés"
-                aria-label="Afficher ou masquer les propriétés"
-                className={`hidden lg:inline-flex items-center justify-center w-8 h-8 rounded-lg border transition-colors ${
-                  inspectorOpen
-                    ? 'border-blue-600/40 bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
-                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                }`}
-              >
-                <Info size={15} />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Contextual Selection & Clipboard Action Bar */}
-        {activeSection !== 'storage' &&
-          activeSection !== 'usb_bridge' &&
-          (selectedNodes.length > 0 || clipboard) && (
-            <div className="px-4 py-2 border-b border-slate-200 dark:border-slate-800 bg-blue-50/70 dark:bg-blue-950/25 flex items-center justify-between gap-3 flex-wrap shrink-0">
-              {selectedNodes.length > 0 ? (
-                <div className="flex items-center gap-2 flex-wrap text-xs">
-                  <span className="font-semibold text-blue-900 dark:text-blue-200 font-mono tabular-nums mr-1">
-                    {selectedNodes.length} sélectionné{selectedNodes.length > 1 ? 's' : ''}
-                  </span>
-
-                  {activeSection === 'trash' ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => handleRestoreNodes(selectedNodes)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 transition-colors"
-                      >
-                        <RotateCcw size={13} />
-                        Restaurer
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDeleteTargets({ nodes: selectedNodes, permanent: true })}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-red-600 dark:text-red-400 hover:bg-red-50 transition-colors"
-                      >
-                        <Trash2 size={13} />
-                        Supprimer définitivement
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      {splitView && (
-                        <button
-                          type="button"
-                          onClick={() => handleSendToOtherPane(false)}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-blue-600 text-white hover:bg-blue-700 font-medium transition-colors"
-                        >
-                          <ArrowLeftRight size={13} />
-                          {transferCopyLabel}
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setClipboard({
-                            mode: 'copy',
-                            nodeIds: selectedNodes.map((n) => n.id),
-                            sourceFolderId: activePane.folderId,
-                          });
-                          pushToast(`${selectedNodes.length} élément(s) copié(s)`, 'info');
-                        }}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
-                      >
-                        <Copy size={13} />
-                        Copier
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setClipboard({
-                            mode: 'cut',
-                            nodeIds: selectedNodes.map((n) => n.id),
-                            sourceFolderId: activePane.folderId,
-                          });
-                          pushToast(`${selectedNodes.length} élément(s) coupé(s)`, 'info');
-                        }}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
-                      >
-                        <Scissors size={13} />
-                        Couper
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleCompressNodes(selectedNodes)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
-                      >
-                        <Archive size={13} />
-                        Compresser .zip
-                      </button>
-                      {selectedNodes.length === 1 && (
-                        <button
-                          type="button"
-                          onClick={() => handleDownloadNode(selectedNodes[0])}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
-                        >
-                          <Download size={13} />
-                          Enregistrer sur PC
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => setDeleteTargets({ nodes: selectedNodes, permanent: false })}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
-                      >
-                        <Trash2 size={13} />
-                        Supprimer
-                      </button>
-                    </>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => setActivePane((p) => ({ ...p, selectedIds: [] }))}
-                    className="ml-1 text-slate-500 hover:text-slate-900 dark:hover:text-slate-100 px-1.5 py-1"
-                  >
-                    Désélectionner
-                  </button>
-                </div>
-              ) : (
-                <div />
-              )}
-
-              {clipboard && activeSection === 'browser' && (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-slate-600 dark:text-slate-300 font-mono tabular-nums">
-                    Presse-papiers ({clipboard.nodeIds.length} ·{' '}
-                    {clipboard.mode === 'cut' ? 'déplacer' : 'copier'})
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handlePaste}
-                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-blue-600 text-white hover:bg-blue-700 font-medium transition-colors whitespace-nowrap"
-                  >
-                    <ClipboardPaste size={13} />
-                    Coller ici
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setClipboard(null)}
-                    aria-label="Vider le presse-papiers"
-                    className="p-1 rounded text-slate-500 hover:text-slate-900 dark:hover:text-slate-100"
-                  >
-                    <X size={14} />
-                  </button>
                 </div>
               )}
             </div>
           )}
 
-        {/* Main Workspace Body */}
-        <main className="flex-1 flex min-h-0 overflow-hidden pb-14 md:pb-0">
-          {activeSection === 'usb_bridge' ? (
-            <UsbBridgeView
-              usbDevice={usbDevice}
-              usbError={usbError}
-              mountedIphoneDirName={mountedIphoneDirName}
-              mountedPcDirName={mountedPcDirName}
-              onConnectWebUsb={handleConnectWebUsb}
-              onDisconnectUsb={handleDisconnectUsb}
-              onEnableDemoUsb={handleEnableDemoUsb}
-              onMountIphoneVolume={handleMountIphoneVolume}
-              onMountPcDirectory={handleMountPcDirectory}
-              onOpenDualPaneExplorer={() => {
-                setSplitView(true);
-                setActiveSection('browser');
-              }}
-            />
-          ) : activeSection === 'storage' ? (
-            <StorageAnalyzer
-              nodes={nodes}
-              nodeMap={nodeMap}
-              onNavigateToFile={handleNavigateToFile}
-              onDeleteNodes={(targets) => setDeleteTargets({ nodes: targets, permanent: false })}
-              onExportFullBackup={handleExportFullBackup}
-              onImportFiles={() => fileInputRef.current?.click()}
-              onImportFolder={handleMountIphoneVolume}
-              onResetFileSystem={handleResetFileSystem}
-            />
-          ) : (
-            <>
+          {/* Main Workspace Body */}
+          <main className="flex-1 flex min-h-0 overflow-hidden pb-14 md:pb-0">
+            {viewerNode ? (
+              <FileViewerModal
+                node={viewerNode}
+                nodeMap={nodeMap}
+                deviceLabel={usbDevice?.productName || null}
+                onClose={() => setViewerNodeId(null)}
+                onSaveText={handleSaveText}
+                onDownload={handleDownloadNode}
+                onCompress={handleCompressNodes}
+                onExtractZip={handleExtractZip}
+              />
+            ) : activeSection === 'usb_bridge' ? (
+              <UsbBridgeView
+                usbDevice={usbDevice}
+                usbError={usbError}
+                nativeDevices={nativeDevices}
+                activeNativeDevice={activeNativeDevice}
+                nativeDestDir={nativeDestDir}
+                nativeBusy={nativeBusy}
+                nativeError={nativeError}
+                mountedIphoneDirName={mountedIphoneDirName}
+                mountedPcDirName={mountedPcDirName}
+                onScanNativeIphone={scanNativeIphone}
+                onSelectNativeDevice={setActiveNativeDevice}
+                onPickNativePcDir={handlePickNativePcDir}
+                onConnectWebUsb={handleConnectWebUsb}
+                onDisconnectUsb={handleDisconnectUsb}
+                onEnableDemoUsb={handleEnableDemoUsb}
+                onMountIphoneVolume={handleMountIphoneVolume}
+                onMountPcDirectory={handleMountPcDirectory}
+                onOpenDualPaneExplorer={() => {
+                  setSplitView(true);
+                  setActiveSection('browser');
+                }}
+              />
+            ) : activeSection === 'storage' ? (
+              <StorageAnalyzer
+                nodes={nodes}
+                nodeMap={nodeMap}
+                onNavigateToFile={handleNavigateToFile}
+                onDeleteNodes={(targets) => setDeleteTargets({ nodes: targets, permanent: false })}
+                onExportFullBackup={handleExportFullBackup}
+                onImportFiles={() => fileInputRef.current?.click()}
+                onImportFolder={handleMountIphoneVolume}
+                onResetFileSystem={handleResetFileSystem}
+              />
+            ) : desktopBridge && activeSection === 'browser' && activeNativeDevice?.status === 'ready' ? (
+              <NativeDualPaneView
+                device={activeNativeDevice}
+                pcDir={nativeDestDir}
+                searchQuery={searchQuery}
+                onChangePcDir={handlePickNativePcDir}
+                onToast={pushToast}
+              />
+            ) : (
               <div className="flex-1 flex min-w-0 h-full overflow-hidden">
                 <FilePane
                   paneId="primary"
-                  paneLabel={mountedIphoneDirName ? `iPhone (${mountedIphoneDirName})` : 'iPhone USB-C'}
+                  panePrefix="iPhone"
+                  paneTitlePath={primaryDisplayPath}
                   isActivePane={activePaneId === 'primary'}
-                  isSplitMode={splitView}
+                  isSplitMode={splitView && activeSection === 'browser'}
                   section={activeSection}
                   folderId={primaryPane.folderId}
                   canGoBack={primaryPane.historyIndex > 0}
@@ -1889,13 +1750,7 @@ export default function App() {
                   onSelectIds={(ids) => setPrimaryPane((p) => ({ ...p, selectedIds: ids }))}
                   onOpenNode={(n) => handleOpenNode('primary', n)}
                   onInspectNode={(n) => {
-                    setActivePaneId('primary');
-                    setPrimaryPane((p) => ({ ...p, selectedIds: [n.id] }));
-                    if (window.innerWidth < 1024) {
-                      setMobileInspectorNode(n);
-                    } else {
-                      setInspectorOpen(true);
-                    }
+                    if (n.kind === 'file') setViewerNodeId(n.id);
                   }}
                   onRenameNode={(n) => setRenameTarget(n)}
                   onDownloadNode={handleDownloadNode}
@@ -1916,10 +1771,11 @@ export default function App() {
                 />
 
                 {splitView && activeSection === 'browser' && (
-                  <div className="hidden xl:flex flex-1 min-w-0 h-full">
+                  <div className="hidden lg:flex flex-1 min-w-0 h-full">
                     <FilePane
                       paneId="secondary"
-                      paneLabel={mountedPcDirName ? `PC (${mountedPcDirName})` : 'PC / Linux'}
+                      panePrefix="PC"
+                      paneTitlePath={secondaryDisplayPath}
                       isActivePane={activePaneId === 'secondary'}
                       isSplitMode={true}
                       section="browser"
@@ -1937,6 +1793,14 @@ export default function App() {
                       categoryFilter="all"
                       showHidden={showHidden}
                       loading={loading}
+                      primaryActionLabel={
+                        primaryPane.selectedIds.length > 0
+                          ? `Copier vers PC (${primaryPane.selectedIds.length})`
+                          : 'Copier vers PC'
+                      }
+                      onPrimaryAction={handleCopyIphoneSelectionToPc}
+                      headerActionLabel={mountedPcDirName ? 'Changer' : 'Lier un dossier'}
+                      onHeaderAction={handleMountPcDirectory}
                       onFocusPane={() => setActivePaneId('secondary')}
                       onNavigateFolder={(id) => navigatePane('secondary', id)}
                       onGoBack={() => goBackPane('secondary')}
@@ -1946,9 +1810,7 @@ export default function App() {
                       onSelectIds={(ids) => setSecondaryPane((p) => ({ ...p, selectedIds: ids }))}
                       onOpenNode={(n) => handleOpenNode('secondary', n)}
                       onInspectNode={(n) => {
-                        setActivePaneId('secondary');
-                        setSecondaryPane((p) => ({ ...p, selectedIds: [n.id] }));
-                        setInspectorOpen(true);
+                        if (n.kind === 'file') setViewerNodeId(n.id);
                       }}
                       onRenameNode={(n) => setRenameTarget(n)}
                       onDownloadNode={handleDownloadNode}
@@ -1973,122 +1835,52 @@ export default function App() {
                   </div>
                 )}
               </div>
-
-              {/* Desktop Right Properties Inspector */}
-              {inspectorOpen && inspectedNode && (
-                <div className="hidden lg:flex shrink-0 h-full">
-                  <InspectorPanel
-                    node={inspectedNode}
-                    allNodes={nodes}
-                    nodeMap={nodeMap}
-                    onClose={() => setInspectorOpen(false)}
-                    onOpen={(n) => handleOpenNode(activePaneId, n)}
-                    onDownload={handleDownloadNode}
-                    onRename={(n) => setRenameTarget(n)}
-                    onToggleStar={handleToggleStar}
-                    onToggleReadOnly={handleToggleReadOnly}
-                    onCompress={handleCompressNodes}
-                    onDelete={(targets) =>
-                      setDeleteTargets({ nodes: targets, permanent: activeSection === 'trash' })
-                    }
-                  />
-                </div>
-              )}
-            </>
-          )}
-        </main>
+            )}
+          </main>
+        </div>
       </div>
 
-      {/* Mobile Bottom Thumb Navigation */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 h-14 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 grid grid-cols-4 items-center">
+      {/* Mobile Bottom Navigation */}
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 h-14 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 grid grid-cols-3 items-center">
         <button
           type="button"
-          onClick={() => setActiveSection('browser')}
-          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[10px] font-medium ${
-            activeSection === 'browser'
-              ? 'text-blue-600 dark:text-blue-400'
+          onClick={() => {
+            setViewerNodeId(null);
+            setActiveSection('usb_bridge');
+          }}
+          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[11px] font-medium ${
+            activeSection === 'usb_bridge'
+              ? 'text-[#1A65C7] dark:text-blue-400'
               : 'text-slate-500 dark:text-slate-400'
           }`}
         >
-          <HardDrive size={19} />
+          <Usb size={18} />
+          Pont USB-C
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setViewerNodeId(null);
+            setActiveSection('browser');
+          }}
+          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[11px] font-medium ${
+            activeSection === 'browser'
+              ? 'text-[#1A65C7] dark:text-blue-400'
+              : 'text-slate-500 dark:text-slate-400'
+          }`}
+        >
+          <HardDrive size={18} />
           Fichiers
         </button>
         <button
           type="button"
-          onClick={() => setActiveSection('usb_bridge')}
-          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[10px] font-medium ${
-            activeSection === 'usb_bridge'
-              ? 'text-blue-600 dark:text-blue-400'
-              : 'text-slate-500 dark:text-slate-400'
-          }`}
-        >
-          <Usb size={19} />
-          USB-C
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveSection('storage')}
-          className={`flex flex-col items-center justify-center h-full gap-0.5 text-[10px] font-medium ${
-            activeSection === 'storage'
-              ? 'text-blue-600 dark:text-blue-400'
-              : 'text-slate-500 dark:text-slate-400'
-          }`}
-        >
-          <PieChart size={19} />
-          Stockage
-        </button>
-        <button
-          type="button"
           onClick={() => fileInputRef.current?.click()}
-          className="flex flex-col items-center justify-center h-full gap-0.5 text-[10px] font-medium text-slate-500 dark:text-slate-400"
+          className="flex flex-col items-center justify-center h-full gap-0.5 text-[11px] font-medium text-slate-500 dark:text-slate-400"
         >
-          <Upload size={19} />
+          <Upload size={18} />
           Importer
         </button>
       </nav>
-
-      {/* Mobile Inspector Sheet */}
-      {mobileInspectorNode && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end lg:hidden bg-slate-950/50 backdrop-blur-xs"
-          onClick={() => setMobileInspectorNode(null)}
-        >
-          <div className="w-full max-w-sm h-full" onClick={(e) => e.stopPropagation()}>
-            <InspectorPanel
-              node={nodeMap[mobileInspectorNode.id] || mobileInspectorNode}
-              allNodes={nodes}
-              nodeMap={nodeMap}
-              onClose={() => setMobileInspectorNode(null)}
-              onOpen={(n) => {
-                setMobileInspectorNode(null);
-                handleOpenNode(activePaneId, n);
-              }}
-              onDownload={handleDownloadNode}
-              onRename={(n) => {
-                setMobileInspectorNode(null);
-                setRenameTarget(n);
-              }}
-              onToggleStar={handleToggleStar}
-              onToggleReadOnly={handleToggleReadOnly}
-              onCompress={handleCompressNodes}
-              onDelete={(targets) => {
-                setMobileInspectorNode(null);
-                setDeleteTargets({ nodes: targets, permanent: activeSection === 'trash' });
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* File Viewer & Editor Modal */}
-      <FileViewerModal
-        node={viewerNode}
-        nodeMap={nodeMap}
-        onClose={() => setViewerNodeId(null)}
-        onSaveText={handleSaveText}
-        onDownload={handleDownloadNode}
-        onExtractZip={handleExtractZip}
-      />
 
       {/* Dialogs */}
       <InputDialog

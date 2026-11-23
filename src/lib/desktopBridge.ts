@@ -3,11 +3,18 @@ export interface DesktopIphoneDevice {
   name: string;
   model: string;
   serialNumber: string;
-  backend: 'wpd' | 'afc';
+  vendorId?: string;
+  productId?: string;
+  backend: 'wpd' | 'usb_pnp' | 'afc';
+  status: 'ready' | 'locked';
+  accessible: boolean;
+  storageCount?: number;
+  hint?: string;
 }
 
 export interface DesktopFsEntry {
   name: string;
+  wpdName?: string;
   kind: 'folder' | 'file';
   size: number;
   modifiedAt: string;
