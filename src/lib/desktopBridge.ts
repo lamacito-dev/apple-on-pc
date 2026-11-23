@@ -36,6 +36,18 @@ declare global {
   }
 }
 
+export const DEFAULT_WINDOWS_EXE_URL =
+  'https://github.com/lamacito-dev/apple-on-pc/releases/latest/download/OpenFS-Setup-1.0.0.exe';
+
+export function getWindowsExeUrl(): string {
+  const configured = (import.meta.env.VITE_WINDOWS_EXE_URL || '').trim();
+  return configured || DEFAULT_WINDOWS_EXE_URL;
+}
+
+export function getWindowsExeFilename(url: string = getWindowsExeUrl()): string {
+  return url.split('/').pop()?.split('?')[0] || 'OpenFS-Setup-1.0.0.exe';
+}
+
 export function getDesktopBridge(): OpenFSDesktopAPI | null {
   if (typeof window !== 'undefined' && window.openfsDesktop?.isDesktop) {
     return window.openfsDesktop;

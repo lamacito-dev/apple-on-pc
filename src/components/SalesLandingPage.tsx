@@ -4,7 +4,6 @@ import {
   Check,
   ChevronDown,
   Download,
-  HardDrive,
   Laptop,
   Minus,
   Moon,
@@ -15,7 +14,7 @@ import {
   Usb,
   X,
 } from 'lucide-react';
-import { detectDesktopOS, downloadDesktopInstallerZip } from '../lib/webUsbBridge';
+import { getWindowsExeFilename, getWindowsExeUrl } from '../lib/desktopBridge';
 
 const IMG_HERO = '/src/assets/images/sales_hero_usbc_1795427199295.jpg';
 const IMG_STEP_1 = '/src/assets/images/sales_step1_plug_1795427199294.jpg';
@@ -139,8 +138,8 @@ const COMPARISON_ROWS = [
 
 const FAQ_ITEMS = [
   {
-    q: 'Comment fonctionne le téléchargement sur mon PC Windows ou Linux ?',
-    a: 'Lorsque vous cliquez sur Télécharger pour PC, votre ordinateur télécharge immédiatement le pack OpenFS (.zip). Il contient un lanceur bureau natif (OpenFS.bat + OpenFS.url pour Windows, sans PowerShell, ou installer-openfs-bureau.sh pour Linux) qui place OpenFS sur votre Bureau et l’ouvre dans sa propre fenêtre dédiée.',
+    q: 'Comment fonctionne le téléchargement et l’installation sur Windows ?',
+    a: 'OpenFS est 100 % gratuit. Lorsque vous cliquez sur Télécharger pour Windows, votre PC télécharge directement l’installeur natif OpenFS-Setup-1.0.0.exe. Lancez-le pour installer l’application sur votre Bureau et dans le menu Démarrer : aucun compte Google, aucun abonnement et aucun navigateur ne sont requis.',
   },
   {
     q: 'Mes photos et mes fichiers passent-ils par un serveur distant ?',
@@ -148,15 +147,15 @@ const FAQ_ITEMS = [
   },
   {
     q: 'Ai-je besoin d’un Mac ou d’installer iTunes ?',
-    a: 'Non. OpenFS est conçu précisément pour les ordinateurs Windows 10/11 et Linux. Sous Windows, seul le pilote USB officiel gratuit « Appareils Apple » (Microsoft Store) est nécessaire si Windows ne reconnaît pas encore votre iPhone. Sous Linux, le pack inclus configure automatiquement usbmuxd et ifuse.',
+    a: 'Non. OpenFS est conçu précisément pour les PC Windows 10 et 11. Si Windows ne reconnaît pas encore votre iPhone en USB-C, le pilote USB officiel gratuit « Appareils Apple » (Microsoft Store) suffit.',
   },
   {
     q: 'Quelles sont les limites imposées par Apple sur un iPhone non jailbreaké ?',
     a: 'Sur un iPhone standard, iOS protège le noyau système et les données privées chiffrées des applications tierces via sa sandbox. En USB-C, vous accédez librement à vos photos et vidéos (DCIM), vos mémos et médias, vos sauvegardes locales, ainsi qu’aux dossiers « Partage de fichiers » des apps compatibles (VLC, Documents, etc.).',
   },
   {
-    q: 'Quel navigateur utiliser pour la fenêtre dédiée et l’écriture disque ?',
-    a: 'Nous recommandons Google Chrome, Microsoft Edge ou Brave sur PC Windows ou Linux. Le lanceur bureau détecte automatiquement votre navigateur compatible pour ouvrir OpenFS en fenêtre autonome avec accès WebUSB et écriture directe sur votre disque dur.',
+    q: 'Windows SmartScreen affiche un avertissement à la première ouverture, est-ce normal ?',
+    a: 'Oui : tant qu’un logiciel gratuit open-source n’est pas signé par un certificat commercial payant, Windows peut afficher « Windows a protégé votre ordinateur ». Cliquez simplement sur « Informations complémentaires » puis sur « Exécuter quand même » pour lancer l’installation.',
   },
 ];
 
@@ -164,51 +163,14 @@ export function SalesLandingPage({
   darkMode,
   onToggleDarkMode,
 }: SalesLandingPageProps) {
-  const windowsExeUrl = (import.meta.env.VITE_WINDOWS_EXE_URL || '').trim();
-  const linuxBinaryUrl = (import.meta.env.VITE_LINUX_APPIMAGE_URL || '').trim();
+  const windowsExeUrl = getWindowsExeUrl();
+  const exeFilename = getWindowsExeFilename(windowsExeUrl);
 
-  const [osTab, setOsTab] = useState<'windows' | 'linux'>(() => detectDesktopOS());
   const [activePreviewIdx, setActivePreviewIdx] = useState<number>(0);
   const [openFaqIndex, setOpenFaqIndex] = useState<number>(0);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadModal, setDownloadModal] = useState<{
-    os: 'windows' | 'linux';
-    filename: string;
-    isNativeExe: boolean;
-  } | null>(null);
+  const [downloadModalOpen, setDownloadModalOpen] = useState<boolean>(false);
 
-  const osLabel = osTab === 'linux' ? 'Linux' : 'Windows';
   const activePreview = INTERFACE_PREVIEWS[activePreviewIdx] || INTERFACE_PREVIEWS[0];
-
-  const handleDownloadDesktopApp = async (targetOs: 'windows' | 'linux' = osTab) => {
-    setDownloading(true);
-    try {
-      const directUrl = targetOs === 'windows' ? windowsExeUrl : linuxBinaryUrl;
-      if (directUrl) {
-        const link = document.createElement('a');
-        link.href = directUrl;
-        link.rel = 'noopener noreferrer';
-        const fallbackName =
-          targetOs === 'windows' ? 'OpenFS-Setup-1.0.0.exe' : 'OpenFS-1.0.0.AppImage';
-        const derivedName = directUrl.split('/').pop()?.split('?')[0] || fallbackName;
-        link.download = derivedName;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        setDownloadModal({
-          os: targetOs,
-          filename: derivedName,
-          isNativeExe: targetOs === 'windows',
-        });
-        return;
-      }
-
-      const filename = await downloadDesktopInstallerZip(targetOs);
-      setDownloadModal({ os: targetOs, filename, isNativeExe: false });
-    } finally {
-      setDownloading(false);
-    }
-  };
 
   return (
     <div className="min-h-screen bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100">
@@ -253,15 +215,17 @@ export function SalesLandingPage({
 
           {/* Zone 3: 1 primary CTA */}
           <div className="shrink-0">
-            <button
-              type="button"
-              disabled={downloading}
-              onClick={() => handleDownloadDesktopApp(osTab)}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+            <a
+              href={windowsExeUrl}
+              download={exeFilename}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setDownloadModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
             >
               <Download size={14} />
-              Télécharger pour PC
-            </button>
+              Télécharger pour Windows
+            </a>
           </div>
         </div>
       </header>
@@ -274,9 +238,9 @@ export function SalesLandingPage({
               <div className="text-xs font-medium text-slate-500 dark:text-slate-400 flex items-center gap-2">
                 <span>iPhone USB-C</span>
                 <span aria-hidden="true">·</span>
-                <span>Windows 10 / 11 & Linux</span>
+                <span>Windows 10 / 11</span>
                 <span aria-hidden="true">·</span>
-                <span>100 % local</span>
+                <span>Gratuit & 100 % local</span>
               </div>
 
               <h1
@@ -286,25 +250,27 @@ export function SalesLandingPage({
                   textWrap: 'balance',
                 }}
               >
-                Accédez aux fichiers de votre iPhone sur PC et Linux.
+                Accédez aux fichiers de votre iPhone sur PC Windows.
               </h1>
 
               <p className="text-base text-slate-600 dark:text-slate-400 leading-relaxed max-w-xl">
-                Branchez votre iPhone en USB-C à un ordinateur non-Apple, parcourez vos photos,
+                Branchez votre iPhone en USB-C à votre PC Windows, parcourez vos photos,
                 documents, archives ZIP et fichiers cachés comme sur Android, puis transférez-les
-                directement sur votre disque dur — sans Mac, sans iTunes et sans cloud.
+                directement sur votre disque dur — gratuitement, sans Mac, sans iTunes et sans cloud.
               </p>
 
               <div className="flex flex-wrap items-center gap-5 pt-2">
-                <button
-                  type="button"
-                  disabled={downloading}
-                  onClick={() => handleDownloadDesktopApp(osTab)}
-                  className="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+                <a
+                  href={windowsExeUrl}
+                  download={exeFilename}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setDownloadModalOpen(true)}
+                  className="inline-flex items-center gap-2 px-5 py-3 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
                 >
                   <Download size={16} />
-                  {downloading ? 'Préparation...' : `Télécharger pour ${osLabel}`}
-                </button>
+                  Télécharger pour Windows
+                </a>
 
                 <a
                   href="#apercu"
@@ -315,23 +281,16 @@ export function SalesLandingPage({
                 </a>
               </div>
 
-              <div className="text-xs text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-3">
-                <span>Autre système :</span>
-                <button
-                  type="button"
-                  onClick={() => handleDownloadDesktopApp(osTab === 'windows' ? 'linux' : 'windows')}
-                  className="font-medium text-slate-700 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 underline underline-offset-2"
-                >
-                  Télécharger pour {osTab === 'windows' ? 'Linux (.zip)' : 'Windows (.zip)'}
-                </button>
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                Installeur Windows 64 bits (<span className="font-mono">{exeFilename}</span>) · Gratuit · Sans compte requis
               </div>
             </div>
 
             <div className="lg:col-span-6">
               <StudioImage
                 src={IMG_HERO}
-                alt="iPhone en titane relié par un câble USB-C tressé à un ordinateur portable Windows et Linux sur un bureau clair"
-                caption="Liaison directe iPhone USB-C vers PC Windows / Linux"
+                alt="iPhone en titane relié par un câble USB-C tressé à un ordinateur portable Windows sur un bureau clair"
+                caption="Liaison directe iPhone USB-C vers PC Windows"
                 className="aspect-4/3 lg:h-full"
               />
             </div>
@@ -350,10 +309,10 @@ export function SalesLandingPage({
 
             <div className="space-y-1">
               <div className="text-xl font-bold font-mono tabular-nums text-slate-900 dark:text-slate-100">
-                Windows & Linux
+                Windows 10 / 11
               </div>
               <div className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                Pack bureau prêt à l’emploi avec lanceur Bureau et pont USB-C inclus.
+                Installeur natif .exe gratuit avec pont USB-C Windows WPD intégré et mode hors-ligne.
               </div>
             </div>
 
@@ -526,7 +485,7 @@ export function SalesLandingPage({
               </div>
             </div>
 
-            {/* Step 02 (Windows / Linux Desktop Pack) */}
+            {/* Step 02 (Windows Native .exe Installer) */}
             <div
               id="scripts"
               className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-14 items-center"
@@ -536,24 +495,26 @@ export function SalesLandingPage({
                   02. Installation bureau
                 </div>
                 <h3 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
-                  Téléchargez le pack bureau Windows ou Linux
+                  Téléchargez l’installeur Windows (.exe)
                 </h3>
                 <p className="text-sm sm:text-base text-slate-600 dark:text-slate-400 leading-relaxed">
-                  Téléchargez votre archive bureau dédiée : elle place le raccourci{' '}
+                  Téléchargez gratuitement l’installeur officiel Windows : il place{' '}
                   <strong className="font-semibold text-slate-900 dark:text-slate-100">OpenFS</strong>{' '}
-                  sur votre Bureau, ouvre l’application en fenêtre autonome et prépare votre dossier
-                  de transfert local PC ↔ iPhone.
+                  sur votre Bureau et dans le menu Démarrer, s’exécute 100 % hors-ligne sans
+                  navigateur et active le pont natif Windows WPD vers votre iPhone.
                 </p>
                 <div className="pt-2">
-                  <button
-                    type="button"
-                    disabled={downloading}
-                    onClick={() => handleDownloadDesktopApp(osTab)}
-                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 transition-colors whitespace-nowrap"
+                  <a
+                    href={windowsExeUrl}
+                    download={exeFilename}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setDownloadModalOpen(true)}
+                    className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap"
                   >
                     <Download size={14} />
-                    Télécharger le pack {osLabel} (.zip)
-                  </button>
+                    Télécharger pour Windows (.exe)
+                  </a>
                 </div>
               </div>
 
@@ -562,88 +523,49 @@ export function SalesLandingPage({
                   <div className="flex items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
                     <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
                       <Terminal size={16} className="text-blue-600 dark:text-blue-400" />
-                      Choisissez votre ordinateur
+                      Application native Windows 10 / 11
                     </div>
-
-                    <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-200/70 dark:bg-slate-800">
-                      <button
-                        type="button"
-                        onClick={() => setOsTab('windows')}
-                        className={`px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                          osTab === 'windows'
-                            ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
-                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                        }`}
-                      >
-                        Windows 10/11
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setOsTab('linux')}
-                        className={`px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                          osTab === 'linux'
-                            ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
-                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                        }`}
-                      >
-                        Linux
-                      </button>
-                    </div>
+                    <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
+                      64 bits · Gratuit
+                    </span>
                   </div>
 
                   <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                    {osTab === 'windows'
-                      ? 'Archive OpenFS-Desktop-Windows.zip : lanceur bureau natif (sans PowerShell), création automatique du dossier OpenFS-iPhone-Sync et ouverture en fenêtre dédiée.'
-                      : 'Archive OpenFS-Desktop-Linux.zip : lanceur .desktop + icône + script automatique usbmuxd / ifuse pour monter votre iPhone dans ~/iPhone-USB.'}
+                    Installeur complet <span className="font-mono">{exeFilename}</span> : accès USB-C
+                    natif à <span className="font-mono">Ce PC → Apple iPhone</span>, icône Bureau,
+                    fonctionnement 100 % hors-ligne sans compte Google ni navigateur.
                   </p>
 
                   <ul className="space-y-2 text-xs text-slate-700 dark:text-slate-300 font-mono">
-                    {osTab === 'windows' ? (
-                      <>
-                        <li className="flex items-center gap-2">
-                          <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
-                          <span>OpenFS.bat — Lanceur Bureau Windows (zéro PowerShell)</span>
-                        </li>
-                        <li className="flex items-center gap-2">
-                          <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
-                          <span>OpenFS.url — Raccourci direct Bureau</span>
-                        </li>
-                        <li className="flex items-center gap-2">
-                          <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
-                          <span>LISEZ-MOI.txt — Guide rapide 3 étapes</span>
-                        </li>
-                      </>
-                    ) : (
-                      <>
-                        <li className="flex items-center gap-2">
-                          <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
-                          <span>installer-openfs-bureau.sh — Lanceur Bureau & Applications</span>
-                        </li>
-                        <li className="flex items-center gap-2">
-                          <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
-                          <span>openfs-usb-linux.sh — Montage USB-C usbmuxd / ifuse</span>
-                        </li>
-                        <li className="flex items-center gap-2">
-                          <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
-                          <span>openfs.svg + LISEZ-MOI.txt</span>
-                        </li>
-                      </>
-                    )}
+                    <li className="flex items-center gap-2">
+                      <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
+                      <span>{exeFilename} — Installeur Windows 10 / 11</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
+                      <span>Pont USB-C natif Windows WPD (DCIM & stockage iPhone)</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <Check size={14} className="text-blue-600 dark:text-blue-400 shrink-0" />
+                      <span>100 % gratuit, local et hors-ligne</span>
+                    </li>
                   </ul>
 
                   <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-200 dark:border-slate-800">
                     <span className="text-xs text-slate-500 dark:text-slate-400">
-                      Archive prête à décompresser :
+                      Téléchargement direct :
                     </span>
-                    <button
-                      type="button"
-                      disabled={downloading}
-                      onClick={() => handleDownloadDesktopApp(osTab)}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white disabled:opacity-60 transition-colors whitespace-nowrap"
+                    <a
+                      href={windowsExeUrl}
+                      download={exeFilename}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => setDownloadModalOpen(true)}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-white transition-colors whitespace-nowrap"
                     >
                       <Download size={14} />
-                      Télécharger {osTab === 'linux' ? 'OpenFS-Desktop-Linux.zip' : 'OpenFS-Desktop-Windows.zip'}
-                    </button>
+                      Télécharger {exeFilename}
+                    </a>
                   </div>
                 </div>
               </div>
@@ -856,40 +778,32 @@ export function SalesLandingPage({
             <div className="space-y-3 max-w-xl">
               <div className="flex items-center gap-2 text-xs font-medium text-blue-300">
                 <ShieldCheck size={15} />
-                <span>Windows & Linux · 100 % local · Hors-ligne</span>
+                <span>Windows 10 / 11 · Gratuit · 100 % local · Hors-ligne</span>
               </div>
               <h2
                 className="text-2xl sm:text-3xl font-bold tracking-tight text-white"
                 style={{ textWrap: 'balance' }}
               >
-                Prêt à installer OpenFS sur votre bureau ?
+                Prêt à installer OpenFS sur votre PC Windows ?
               </h2>
               <p className="text-sm text-slate-300 leading-relaxed">
-                Téléchargez le pack bureau pour Windows ou Linux en un clic, créez votre raccourci
-                en fenêtre dédiée et connectez votre câble USB-C.
+                Téléchargez gratuitement l’installeur Windows ({exeFilename}) en un clic, lancez
+                l’application hors-ligne et branchez votre câble USB-C.
               </p>
             </div>
 
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0">
-              <button
-                type="button"
-                disabled={downloading}
-                onClick={() => handleDownloadDesktopApp(osTab)}
-                className="inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-60 transition-colors whitespace-nowrap"
+            <div className="flex items-center shrink-0">
+              <a
+                href={windowsExeUrl}
+                download={exeFilename}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setDownloadModalOpen(true)}
+                className="inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors whitespace-nowrap"
               >
                 <Download size={16} />
-                Télécharger pour {osLabel}
-              </button>
-              <button
-                type="button"
-                disabled={downloading}
-                onClick={() =>
-                  handleDownloadDesktopApp(osTab === 'windows' ? 'linux' : 'windows')
-                }
-                className="inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-medium rounded-lg border border-slate-700 text-slate-200 hover:bg-slate-800 disabled:opacity-60 transition-colors whitespace-nowrap"
-              >
-                Version {osTab === 'windows' ? 'Linux (.zip)' : 'Windows (.zip)'}
-              </button>
+                Télécharger pour Windows
+              </a>
             </div>
           </div>
         </section>
@@ -930,10 +844,10 @@ export function SalesLandingPage({
       </footer>
 
       {/* Download Confirmation & Quick Setup Modal */}
-      {downloadModal && (
+      {downloadModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-xs p-4"
-          onClick={() => setDownloadModal(null)}
+          onClick={() => setDownloadModalOpen(false)}
         >
           <div
             className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden"
@@ -949,13 +863,13 @@ export function SalesLandingPage({
                     Téléchargement lancé
                   </h2>
                   <p className="text-xs font-mono text-slate-500 dark:text-slate-400">
-                    {downloadModal.filename}
+                    {exeFilename}
                   </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setDownloadModal(null)}
+                onClick={() => setDownloadModalOpen(false)}
                 aria-label="Fermer"
                 className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 dark:hover:text-slate-100 dark:hover:bg-slate-800 transition-colors"
               >
@@ -974,15 +888,7 @@ export function SalesLandingPage({
                     <strong className="font-semibold text-slate-900 dark:text-slate-100">
                       Téléchargements
                     </strong>{' '}
-                    {downloadModal.isNativeExe ? (
-                      <>
-                        et lancez <code className="font-mono text-xs">{downloadModal.filename}</code>.
-                      </>
-                    ) : (
-                      <>
-                        et décompressez <code className="font-mono text-xs">{downloadModal.filename}</code>.
-                      </>
-                    )}
+                    et lancez <code className="font-mono text-xs">{exeFilename}</code>.
                   </p>
                 </li>
                 <li className="flex items-start gap-3">
@@ -990,31 +896,9 @@ export function SalesLandingPage({
                     2
                   </span>
                   <p className="leading-relaxed">
-                    {downloadModal.isNativeExe ? (
-                      <>
-                        Suivez l’assistant d’installation Windows : il place automatiquement{' '}
-                        <strong>OpenFS</strong> sur votre Bureau et dans le menu Démarrer (100 %
-                        hors-ligne, sans navigateur).
-                      </>
-                    ) : downloadModal.os === 'windows' ? (
-                      <>
-                        Double-cliquez sur{' '}
-                        <code className="font-mono text-xs font-semibold text-slate-900 dark:text-slate-100">
-                          OpenFS.bat
-                        </code>{' '}
-                        (ou <code className="font-mono text-xs">OpenFS.url</code>) pour copier le
-                        lanceur <strong>OpenFS</strong> sur votre Bureau Windows et l’ouvrir en
-                        fenêtre dédiée.
-                      </>
-                    ) : (
-                      <>
-                        Exécutez{' '}
-                        <code className="font-mono text-xs font-semibold text-slate-900 dark:text-slate-100">
-                          chmod +x *.sh && ./installer-openfs-bureau.sh
-                        </code>{' '}
-                        pour créer le lanceur <strong>OpenFS</strong> sur votre Bureau Linux.
-                      </>
-                    )}
+                    Suivez l’assistant d’installation Windows : il place automatiquement{' '}
+                    <strong>OpenFS</strong> sur votre Bureau et dans le menu Démarrer (100 %
+                    hors-ligne, sans navigateur ni compte Google).
                   </p>
                 </li>
                 <li className="flex items-start gap-3">
@@ -1022,28 +906,27 @@ export function SalesLandingPage({
                     3
                   </span>
                   <p className="leading-relaxed">
-                    {downloadModal.os === 'windows'
-                      ? 'Branchez votre iPhone en USB-C, appuyez sur « Faire confiance » sur l’iPhone, puis cliquez sur Détecter l’iPhone dans OpenFS.'
-                      : 'Branchez votre iPhone en USB-C et lancez ./openfs-usb-linux.sh inclus dans le dossier pour monter ~/iPhone-USB.'}
+                    Branchez votre iPhone en USB-C, appuyez sur « Faire confiance » sur l’iPhone,
+                    puis cliquez sur <strong>Détecter l’iPhone</strong> dans OpenFS.
                   </p>
                 </li>
               </ol>
 
               <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleDownloadDesktopApp(downloadModal.os === 'windows' ? 'linux' : 'windows')
-                  }
+                <a
+                  href={windowsExeUrl}
+                  download={exeFilename}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 underline underline-offset-2"
                 >
-                  <HardDrive size={13} />
-                  Télécharger plutôt pour {downloadModal.os === 'windows' ? 'Linux' : 'Windows'}
-                </button>
+                  <Download size={13} />
+                  Relancer le téléchargement (.exe)
+                </a>
 
                 <button
                   type="button"
-                  onClick={() => setDownloadModal(null)}
+                  onClick={() => setDownloadModalOpen(false)}
                   className="px-4 py-2 text-xs font-semibold rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap"
                 >
                   Terminé

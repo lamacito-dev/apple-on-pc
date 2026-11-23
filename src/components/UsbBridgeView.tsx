@@ -19,14 +19,14 @@ import {
   Usb,
 } from 'lucide-react';
 import {
-  detectDesktopOS,
-  downloadDesktopInstallerZip,
   isDirectoryPickerSupported,
   isWebUsbSupported,
   type ConnectedUsbDeviceInfo,
 } from '../lib/webUsbBridge';
 import {
   getDesktopBridge,
+  getWindowsExeFilename,
+  getWindowsExeUrl,
   type DesktopFsEntry,
   type DesktopIphoneDevice,
 } from '../lib/desktopBridge';
@@ -58,9 +58,9 @@ export function UsbBridgeView({
   onOpenDualPaneExplorer,
 }: UsbBridgeViewProps) {
   const desktopBridge = getDesktopBridge();
-  const [osTab, setOsTab] = useState<'linux' | 'windows'>(() => detectDesktopOS());
+  const windowsExeUrl = getWindowsExeUrl();
+  const windowsExeFilename = getWindowsExeFilename(windowsExeUrl);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [downloadingPack, setDownloadingPack] = useState(false);
 
   // Native Electron Windows WPD / AFC State
   const [nativeDevices, setNativeDevices] = useState<DesktopIphoneDevice[]>([]);
@@ -161,38 +161,6 @@ export function UsbBridgeView({
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 1600);
   };
-
-  const handleDownloadPack = async (os: 'linux' | 'windows') => {
-    setDownloadingPack(true);
-    try {
-      await downloadDesktopInstallerZip(os);
-    } finally {
-      setDownloadingPack(false);
-    }
-  };
-
-  const linuxCommands = [
-    {
-      id: 'lin_install',
-      label: '1. Installer les pilotes USB-C Apple (Ubuntu / Debian)',
-      cmd: 'sudo apt update && sudo apt install -y usbmuxd libimobiledevice-utils ifuse',
-    },
-    {
-      id: 'lin_pair',
-      label: '2. Appairer l’iPhone branché en USB-C (valider « Faire confiance » sur l’écran)',
-      cmd: 'idevicepair pair && idevicepair validate',
-    },
-    {
-      id: 'lin_mount',
-      label: '3. Monter tout le stockage accessible (DCIM, Media, Downloads) dans ~/iPhone-USB',
-      cmd: 'mkdir -p ~/iPhone-USB && ifuse ~/iPhone-USB',
-    },
-    {
-      id: 'lin_app',
-      label: 'Option : Monter les fichiers d’une app spécifique (ex. VLC, Documents)',
-      cmd: 'ifuse --list-apps && ifuse --documents org.videolan.vlc-ios ~/iPhone-USB',
-    },
-  ];
 
   const windowsCommands = [
     {
@@ -556,7 +524,7 @@ export function UsbBridgeView({
                   ) : (
                     <tr>
                       <td colSpan={3} className="py-3 px-4 text-slate-500 dark:text-slate-400">
-                        Périphérique détecté ({usbDevice.vendorHex}:{usbDevice.productHex}). Les interfaces bas niveau sont gérées par le pilote système ({osTab === 'linux' ? 'usbmuxd' : 'Apple Mobile Device'}).
+                        Périphérique détecté ({usbDevice.vendorHex}:{usbDevice.productHex}). Les interfaces bas niveau sont gérées par le pilote système (Apple Mobile Device).
                       </td>
                     </tr>
                   )}
@@ -566,41 +534,16 @@ export function UsbBridgeView({
           </section>
         )}
 
-        {/* Native OS Setup Guide & Downloadable Companion Scripts */}
+        {/* Native OS Setup Guide & Direct Windows Installer */}
         <section className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                Débloquer l’accès complet sur ordinateur non-Apple
+                Débloquer l’accès complet sur PC Windows 10 / 11
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Contrairement à Android (MTP), iOS utilise le protocole propriétaire Apple AFC sur USB-C. Utilisez le pont natif ci-dessous pour exposer tout l’iPhone en un clic.
+                Contrairement à Android (MTP), iOS utilise le protocole Apple sur USB-C. Utilisez l’application Windows native gratuite ci-dessous pour parcourir tout l’iPhone en un clic.
               </p>
-            </div>
-
-            <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-200/70 dark:bg-slate-800 shrink-0 self-start sm:self-auto">
-              <button
-                type="button"
-                onClick={() => setOsTab('linux')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                  osTab === 'linux'
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                }`}
-              >
-                Linux (ifuse / AFC)
-              </button>
-              <button
-                type="button"
-                onClick={() => setOsTab('windows')}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                  osTab === 'windows'
-                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 shadow-2xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-                }`}
-              >
-                Windows 10 / 11
-              </button>
             </div>
           </div>
 
@@ -610,31 +553,28 @@ export function UsbBridgeView({
                 <Terminal size={17} className="text-blue-600 dark:text-blue-400 shrink-0" />
                 <div>
                   <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    {osTab === 'linux'
-                      ? 'Pack bureau & montage Linux (ifuse)'
-                      : 'Pack bureau Windows 10 / 11'}
+                    Installeur natif Windows 10 / 11 (.exe)
                   </div>
                   <div className="text-xs text-slate-500 dark:text-slate-400">
-                    {osTab === 'linux'
-                      ? 'Installe le lanceur OpenFS sur le Bureau et monte ~/iPhone-USB sans iTunes.'
-                      : 'Installe l’icône OpenFS sur le Bureau et prépare le dossier de transfert PC.'}
+                    Gratuit · Installe OpenFS sur le Bureau avec pont USB-C Windows WPD intégré.
                   </div>
                 </div>
               </div>
 
-              <button
-                type="button"
-                disabled={downloadingPack}
-                onClick={() => handleDownloadPack(osTab)}
-                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+              <a
+                href={windowsExeUrl}
+                download={windowsExeFilename}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
               >
                 <Download size={14} />
-                Télécharger {osTab === 'linux' ? 'OpenFS-Desktop-Linux.zip' : 'OpenFS-Desktop-Windows.zip'}
-              </button>
+                Télécharger pour Windows (.exe)
+              </a>
             </div>
 
             <div className="space-y-3">
-              {(osTab === 'linux' ? linuxCommands : windowsCommands).map((item) => (
+              {windowsCommands.map((item) => (
                 <div key={item.id} className="space-y-1.5">
                   <div className="text-xs font-medium text-slate-700 dark:text-slate-300">
                     {item.label}
