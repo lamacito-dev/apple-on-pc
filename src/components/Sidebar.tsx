@@ -56,19 +56,24 @@ export function Sidebar({
       },
     },
     {
-      id: 'photos_dcim',
-      label: 'Photos DCIM',
+      id: 'photos',
+      label: 'Photos & Vidéos',
       icon: Camera,
       active:
-        activeSection === 'browser' &&
-        activePaneId === 'primary' &&
-        (activeFolderId === 'dir_100apple' ||
-          activeFolderId === 'dir_dcim' ||
-          activeFolderId === 'dir_media' ||
-          activeFolderId === 'root_internal'),
+        activeSection === 'photos' ||
+        (activeSection === 'browser' &&
+          activePaneId === 'primary' &&
+          (activeFolderId === 'dir_100apple' ||
+            activeFolderId === 'dir_dcim' ||
+            activeFolderId === 'dir_media' ||
+            activeFolderId === 'root_internal')),
       onClick: () => {
-        onSelectSection('browser');
-        onSelectFolder('dir_100apple', 'primary');
+        if (isDesktopExe) {
+          onSelectSection('photos');
+        } else {
+          onSelectSection('browser');
+          onSelectFolder('dir_100apple', 'primary');
+        }
         onCloseMobile();
       },
     },
@@ -77,12 +82,17 @@ export function Sidebar({
       label: 'Documents',
       icon: FileText,
       active:
-        activeSection === 'browser' &&
-        activePaneId === 'primary' &&
-        (activeFolderId === 'dir_documents' || activeFolderId === 'root_containers'),
+        activeSection === 'documents' ||
+        (activeSection === 'browser' &&
+          activePaneId === 'primary' &&
+          (activeFolderId === 'dir_documents' || activeFolderId === 'root_containers')),
       onClick: () => {
-        onSelectSection('browser');
-        onSelectFolder('dir_documents', 'primary');
+        if (isDesktopExe) {
+          onSelectSection('documents');
+        } else {
+          onSelectSection('browser');
+          onSelectFolder('dir_documents', 'primary');
+        }
         onCloseMobile();
       },
     },
@@ -91,12 +101,17 @@ export function Sidebar({
       label: 'Téléchargements',
       icon: Download,
       active:
-        activeSection === 'browser' &&
-        activePaneId === 'primary' &&
-        activeFolderId === 'dir_downloads',
+        activeSection === 'downloads' ||
+        (activeSection === 'browser' &&
+          activePaneId === 'primary' &&
+          activeFolderId === 'dir_downloads'),
       onClick: () => {
-        onSelectSection('browser');
-        onSelectFolder('dir_downloads', 'primary');
+        if (isDesktopExe) {
+          onSelectSection('downloads');
+        } else {
+          onSelectSection('browser');
+          onSelectFolder('dir_downloads', 'primary');
+        }
         onCloseMobile();
       },
     },
@@ -105,11 +120,16 @@ export function Sidebar({
       label: 'Stockage PC',
       icon: HardDrive,
       active:
-        activeSection === 'browser' &&
-        (activePaneId === 'secondary' || activeFolderId === 'root_pc'),
+        activeSection === 'pc_storage' ||
+        (activeSection === 'browser' &&
+          (activePaneId === 'secondary' || activeFolderId === 'root_pc')),
       onClick: () => {
-        onSelectSection('browser');
-        onSelectFolder('root_pc', 'secondary');
+        if (isDesktopExe) {
+          onSelectSection('pc_storage');
+        } else {
+          onSelectSection('browser');
+          onSelectFolder('root_pc', 'secondary');
+        }
         onCloseMobile();
       },
     },
@@ -144,7 +164,7 @@ export function Sidebar({
         </button>
       </div>
 
-      {/* Primary 5 Navigation Items matching OpenFS desktop reference */}
+      {/* Primary 5 Navigation Items */}
       <nav className="flex-1 px-2.5 pt-2 space-y-1 overflow-y-auto">
         {navItems.map((item) => {
           const Icon = item.icon;
@@ -183,25 +203,27 @@ export function Sidebar({
       {/* Quiet bottom utilities */}
       <div className="px-3 py-3 flex items-center justify-between gap-1 shrink-0">
         <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => {
-              onSelectSection('trash');
-              onCloseMobile();
-            }}
-            title="Corbeille"
-            aria-label="Corbeille"
-            className={`inline-flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs transition-colors ${
-              activeSection === 'trash'
-                ? 'bg-[#E5EBF3] dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
-                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800/50'
-            }`}
-          >
-            <Trash2 size={15} />
-            {trashedCount > 0 && (
-              <span className="font-mono tabular-nums text-[11px]">{trashedCount}</span>
-            )}
-          </button>
+          {!isDesktopExe && (
+            <button
+              type="button"
+              onClick={() => {
+                onSelectSection('trash');
+                onCloseMobile();
+              }}
+              title="Corbeille"
+              aria-label="Corbeille"
+              className={`inline-flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-xs transition-colors ${
+                activeSection === 'trash'
+                  ? 'bg-[#E5EBF3] dark:bg-slate-800 text-slate-900 dark:text-white font-medium'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800/50'
+              }`}
+            >
+              <Trash2 size={15} />
+              {trashedCount > 0 && (
+                <span className="font-mono tabular-nums text-[11px]">{trashedCount}</span>
+              )}
+            </button>
+          )}
 
           {onReturnToSite && !isDesktopExe && (
             <button

@@ -15,6 +15,10 @@ export type VolumeId = 'internal' | 'containers' | 'icloud' | 'local_mount' | 'p
 export type SidebarSection =
   | 'browser'
   | 'usb_bridge'
+  | 'photos'
+  | 'documents'
+  | 'downloads'
+  | 'pc_storage'
   | 'recents'
   | 'favorites'
   | 'trash'

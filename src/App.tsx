@@ -63,7 +63,8 @@ import { getDesktopBridge, type DesktopIphoneDevice } from './lib/desktopBridge'
 import { Sidebar } from './components/Sidebar';
 import { FilePane } from './components/FilePane';
 import { FileViewerModal } from './components/FileViewerModal';
-import { NativeDualPaneView } from './components/NativeDualPaneView';
+import { NativeMediaWorkspace } from './components/NativeMediaWorkspace';
+import { NativePcBrowserView } from './components/NativePcBrowserView';
 import { StorageAnalyzer } from './components/StorageAnalyzer';
 import { UsbBridgeView } from './components/UsbBridgeView';
 import { ConfirmDeleteDialog, InputDialog } from './components/Dialogs';
@@ -106,6 +107,8 @@ export default function App() {
   const [nativeDevices, setNativeDevices] = useState<DesktopIphoneDevice[]>([]);
   const [activeNativeDevice, setActiveNativeDevice] = useState<DesktopIphoneDevice | null>(null);
   const [nativeDestDir, setNativeDestDir] = useState<string>('');
+  const [nativeDocsDir, setNativeDocsDir] = useState<string>('');
+  const [nativeDownloadsDir, setNativeDownloadsDir] = useState<string>('');
   const [nativeBusy, setNativeBusy] = useState(false);
   const [nativeError, setNativeError] = useState<string | null>(null);
   const nativeScanInFlightRef = useRef(false);
@@ -393,6 +396,17 @@ export default function App() {
       .getDefaultSyncDir()
       .then((dir) => setNativeDestDir((curr) => curr || dir))
       .catch(() => {});
+
+    if (typeof bridge.getSystemFolder === 'function') {
+      bridge
+        .getSystemFolder('documents')
+        .then((dir) => setNativeDocsDir((curr) => curr || dir))
+        .catch(() => {});
+      bridge
+        .getSystemFolder('downloads')
+        .then((dir) => setNativeDownloadsDir((curr) => curr || dir))
+        .catch(() => {});
+    }
 
     scanNativeIphone(true);
     const interval = window.setInterval(() => {
@@ -1586,7 +1600,7 @@ export default function App() {
                 )}
               </div>
 
-              {!(desktopBridge && activeSection === 'browser' && activeNativeDevice?.status === 'ready') && (
+              {!desktopBridge && (
                 <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
@@ -1696,7 +1710,7 @@ export default function App() {
                 onMountPcDirectory={handleMountPcDirectory}
                 onOpenDualPaneExplorer={() => {
                   setSplitView(true);
-                  setActiveSection('browser');
+                  setActiveSection(desktopBridge ? 'photos' : 'browser');
                 }}
               />
             ) : activeSection === 'storage' ? (
@@ -1710,13 +1724,66 @@ export default function App() {
                 onImportFolder={handleMountIphoneVolume}
                 onResetFileSystem={handleResetFileSystem}
               />
-            ) : desktopBridge && activeSection === 'browser' && activeNativeDevice?.status === 'ready' ? (
-              <NativeDualPaneView
-                device={activeNativeDevice}
-                pcDir={nativeDestDir}
+            ) : desktopBridge && (activeSection === 'photos' || activeSection === 'browser') ? (
+              activeNativeDevice?.status === 'ready' ? (
+                <NativeMediaWorkspace
+                  device={activeNativeDevice}
+                  pcDir={nativeDestDir}
+                  searchQuery={searchQuery}
+                  onChangePcDir={handlePickNativePcDir}
+                  onToast={pushToast}
+                />
+              ) : (
+                <div className="flex-1 flex items-center justify-center p-8">
+                  <div className="max-w-md w-full rounded-2xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 p-7 text-center space-y-4">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                      {activeNativeDevice?.status === 'locked'
+                        ? 'Déverrouillez votre iPhone'
+                        : 'Aucun iPhone prêt en USB-C'}
+                    </h2>
+                    <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+                      {activeNativeDevice?.hint ||
+                        'Branchez votre iPhone en USB-C, déverrouillez l’écran et appuyez sur « Autoriser » ou « Faire confiance » pour afficher vos photos et vidéos classées par date.'}
+                    </p>
+                    <div className="flex items-center justify-center gap-2.5 pt-1">
+                      <button
+                        type="button"
+                        disabled={nativeBusy}
+                        onClick={() => scanNativeIphone(false)}
+                        className="px-4 py-2 rounded-lg bg-[#1A65C7] hover:bg-[#1557B0] disabled:opacity-50 text-white text-xs font-medium transition-colors"
+                      >
+                        {nativeBusy ? 'Recherche...' : 'Détecter l’iPhone'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setActiveSection('usb_bridge')}
+                        className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 text-xs font-medium transition-colors"
+                      >
+                        Pont USB-C
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            ) : desktopBridge && activeSection === 'documents' ? (
+              <NativePcBrowserView
+                title="Documents"
+                rootPath={nativeDocsDir}
                 searchQuery={searchQuery}
-                onChangePcDir={handlePickNativePcDir}
-                onToast={pushToast}
+              />
+            ) : desktopBridge && activeSection === 'downloads' ? (
+              <NativePcBrowserView
+                title="Téléchargements"
+                rootPath={nativeDownloadsDir}
+                searchQuery={searchQuery}
+              />
+            ) : desktopBridge && activeSection === 'pc_storage' ? (
+              <NativePcBrowserView
+                title="Stockage PC"
+                rootPath={nativeDestDir}
+                searchQuery={searchQuery}
+                allowChangeRoot
+                onChangeRoot={handlePickNativePcDir}
               />
             ) : (
               <div className="flex-1 flex min-w-0 h-full overflow-hidden">

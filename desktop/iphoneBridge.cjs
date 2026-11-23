@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -8,6 +9,18 @@ const JSON_END_MARKER = '<<<OPENFS_JSON_END>>>';
 
 let activeScanPromise = null;
 
+const PREVIEW_CACHE_ROOT = path.join(os.tmpdir(), 'openfs-preview-cache');
+const THUMB_CACHE_ROOT = path.join(os.tmpdir(), 'openfs-thumb-cache');
+
+function ensureCacheDirs() {
+  fs.mkdirSync(PREVIEW_CACHE_ROOT, { recursive: true });
+  fs.mkdirSync(THUMB_CACHE_ROOT, { recursive: true });
+}
+
+function hashKey(input) {
+  return crypto.createHash('sha1').update(String(input || '')).digest('hex');
+}
+
 function runCommand(cmd, args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(
@@ -16,7 +29,7 @@ function runCommand(cmd, args, options = {}) {
       {
         windowsHide: true,
         encoding: 'utf8',
-        maxBuffer: 25 * 1024 * 1024,
+        maxBuffer: 40 * 1024 * 1024,
         timeout: options.timeout ?? 30000,
         env: options.env ? { ...process.env, ...options.env } : process.env,
       },
@@ -78,8 +91,7 @@ function parseMarkedJson(stdout, fallback = []) {
   }
 
   if (!jsonText || jsonText === 'null') return fallback;
-  const parsed = JSON.parse(jsonText);
-  return parsed;
+  return JSON.parse(jsonText);
 }
 
 function sanitizeSegments(relativePath) {
@@ -97,6 +109,37 @@ function getDefaultSyncDir() {
   return dir;
 }
 
+function getSystemFolder(kind) {
+  const home = os.homedir();
+  if (kind === 'documents') {
+    const candidates = [
+      path.join(home, 'Documents'),
+      path.join(home, 'OneDrive', 'Documents'),
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) return c;
+    }
+    const fallback = path.join(home, 'Documents');
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  }
+
+  if (kind === 'downloads') {
+    const candidates = [
+      path.join(home, 'Downloads'),
+      path.join(home, 'Téléchargements'),
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) return c;
+    }
+    const fallback = path.join(home, 'Downloads');
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  }
+
+  return getDefaultSyncDir();
+}
+
 function describeApplePid(pidHex) {
   const upper = String(pidHex || '').toUpperCase();
   if (upper === '0X12A8' || upper === '12A8') return 'Apple iPhone (USB-C / Lightning)';
@@ -105,6 +148,122 @@ function describeApplePid(pidHex) {
   if (upper === '0X1227' || upper === '1227') return 'Apple iPhone (Mode DFU)';
   return 'Apple iPhone (USB)';
 }
+
+function classifyMediaType(fileName) {
+  const lower = String(fileName || '').toLowerCase();
+  if (lower.endsWith('.aae')) return 'sidecar';
+  if (/\.(jpg|jpeg|png|heic|heif|webp|gif|bmp|dng|raw|tif|tiff)$/.test(lower)) return 'photo';
+  if (/\.(mov|mp4|m4v|avi|mkv|3gp|webm)$/.test(lower)) return 'video';
+  if (/\.(m4a|mp3|wav|flac|aac|ogg)$/.test(lower)) return 'audio';
+  return 'document';
+}
+
+function inferMimeFromExt(fileName) {
+  const ext = path.extname(String(fileName || '')).toLowerCase().replace(/^\./, '');
+  const map = {
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    bmp: 'image/bmp',
+    svg: 'image/svg+xml',
+    heic: 'image/heic',
+    heif: 'image/heif',
+    mov: 'video/quicktime',
+    mp4: 'video/mp4',
+    m4v: 'video/mp4',
+    webm: 'video/webm',
+    avi: 'video/x-msvideo',
+    mkv: 'video/x-matroska',
+    mp3: 'audio/mpeg',
+    m4a: 'audio/mp4',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg',
+    pdf: 'application/pdf',
+    txt: 'text/plain',
+    md: 'text/markdown',
+    json: 'application/json',
+    xml: 'application/xml',
+    csv: 'text/csv',
+    log: 'text/plain',
+    html: 'text/html',
+    css: 'text/css',
+    js: 'text/javascript',
+    ts: 'text/typescript',
+    zip: 'application/zip',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+function inferDateFromFolderName(folderName) {
+  const match = String(folderName || '').match(/(20\d{2})(0[1-9]|1[0-2])/);
+  if (!match) return '';
+  return `${match[1]}-${match[2]}-01T12:00:00.000Z`;
+}
+
+// Shared C# helper using Windows Shell IShellItemImageFactory (works on WPD Shell paths AND local PC files, including HEIC & MOV/MP4!)
+const CSHARP_THUMB_HELPER = `
+$thumbCode = @'
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+
+public static class OpenFsThumbExtractor {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct SIZE {
+    public int cx;
+    public int cy;
+    public SIZE(int x, int y) { cx = x; cy = y; }
+  }
+
+  [ComImport]
+  [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  [Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b")]
+  public interface IShellItemImageFactory {
+    [PreserveSig]
+    int GetImage([In, MarshalAs(UnmanagedType.Struct)] SIZE size, [In] int flags, [Out] out IntPtr phbm);
+  }
+
+  [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+  private static extern int SHCreateItemFromParsingName(
+    [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+    IntPtr pbc,
+    [In] ref Guid riid,
+    [Out, MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory ppv
+  );
+
+  [DllImport("gdi32.dll")]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool DeleteObject(IntPtr hObject);
+
+  public static bool SaveThumbnail(string parsingPath, string outJpgPath, int maxSize, int flags) {
+    Guid iid = new Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+    IShellItemImageFactory factory = null;
+    IntPtr hBitmap = IntPtr.Zero;
+    try {
+      int hr = SHCreateItemFromParsingName(parsingPath, IntPtr.Zero, ref iid, out factory);
+      if (hr != 0 || factory == null) return false;
+      hr = factory.GetImage(new SIZE(maxSize, maxSize), flags, out hBitmap);
+      if (hr != 0 || hBitmap == IntPtr.Zero) return false;
+      using (Bitmap bmp = Image.FromHbitmap(hBitmap)) {
+        bmp.Save(outJpgPath, ImageFormat.Jpeg);
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (hBitmap != IntPtr.Zero) DeleteObject(hBitmap);
+      if (factory != null) Marshal.ReleaseComObject(factory);
+    }
+  }
+}
+'@
+if (-not ('OpenFsThumbExtractor' -as [type])) {
+  Add-Type -TypeDefinition $thumbCode -ReferencedAssemblies System.Drawing
+}
+`;
 
 async function detectLibimobiledevice() {
   try {
@@ -163,8 +322,6 @@ async function detectWindowsDevices() {
 $wpdDevices = @()
 $pnpDevices = @()
 
-# Layer 1: Windows Shell WPD (Namespace 17 = "Ce PC" / "This PC")
-# Matches ANY Apple device by VID_05AC in its WPD path OR by Apple/iPhone/iPad in its display name.
 try {
   $shell = New-Object -ComObject Shell.Application
   $computer = $shell.Namespace(17)
@@ -222,8 +379,6 @@ try {
   }
 } catch {}
 
-# Layer 2: Windows PnP USB Devices (VID_05AC)
-# Detects plugged-in iPhones even when locked, untrusted, or not yet mounted in Explorer WPD.
 try {
   $pnpList = Get-CimInstance -ClassName Win32_PnPEntity -Filter "PNPDeviceID LIKE '%VID_05AC%'" -ErrorAction SilentlyContinue
   if ($null -eq $pnpList) {
@@ -241,7 +396,6 @@ try {
         $pidHex = $Matches[1].ToUpper()
       }
 
-      # Filter specifically for iOS / iPadOS devices (PIDs 1290..12AF, 1281, 1227) or Apple Mobile Device / iPhone / iPad names
       $isIosPid = ($pidHex -match '^12(9[0-9A-F]|A[0-9A-F]|81|27)$')
       $isIosName = ($pnpName -match 'iPhone|iPad|Apple Mobile Device')
       if ($isIosPid -or $isIosName) {
@@ -283,7 +437,6 @@ Write-Output '${JSON_END_MARKER}'
     const wpdList = Array.isArray(parsed.wpd) ? parsed.wpd : parsed.wpd ? [parsed.wpd] : [];
     const pnpList = Array.isArray(parsed.pnp) ? parsed.pnp : parsed.pnp ? [parsed.pnp] : [];
 
-    // Extract best hardware serial & PID from PnP entries to enrich WPD entries
     const primaryPnp =
       pnpList.find((p) => p.serialNumber && p.serialNumber.length >= 8) || pnpList[0] || null;
 
@@ -313,7 +466,6 @@ Write-Output '${JSON_END_MARKER}'
       });
     }
 
-    // If WPD didn't mount anything yet, but Windows USB PnP sees an Apple iPhone/iPad plugged in:
     if (results.length === 0 && pnpList.length > 0) {
       const seenSerials = new Set();
       for (const pnp of pnpList) {
@@ -364,7 +516,6 @@ async function listIphoneDevices() {
       ]);
 
       if (winDevices.length > 0) {
-        // Avoid duplicating the same iPhone if both Windows WPD/PnP and libimobiledevice see it
         const knownSerials = new Set(
           winDevices
             .map((d) => String(d.serialNumber || '').toLowerCase())
@@ -405,7 +556,6 @@ foreach ($it in $computer.Items()) {
   }
 }
 
-# Fallback: if WPD path changed slightly on reconnect, match first Apple WPD device
 if (-not $deviceItem) {
   foreach ($it in $computer.Items()) {
     if (([string]$it.Path -match 'vid_05ac') -or ([string]$it.Name -match 'iPhone|iPad|Apple')) {
@@ -471,11 +621,21 @@ foreach ($entry in $folder.Items()) {
 
   $modIso = ''
   try {
-    $dt = $entry.ExtendedProperty("System.DateModified")
-    if ($null -ne $dt) {
-      $modIso = ([datetime]$dt).ToString('o')
-    }
+    $dt = $entry.ExtendedProperty("System.Photo.DateTaken")
+    if ($null -ne $dt) { $modIso = ([datetime]$dt).ToString('o') }
   } catch {}
+  if (-not $modIso) {
+    try {
+      $dt = $entry.ExtendedProperty("System.Media.DateEncoded")
+      if ($null -ne $dt) { $modIso = ([datetime]$dt).ToString('o') }
+    } catch {}
+  }
+  if (-not $modIso) {
+    try {
+      $dt = $entry.ExtendedProperty("System.DateModified")
+      if ($null -ne $dt) { $modIso = ([datetime]$dt).ToString('o') }
+    } catch {}
+  }
   if (-not $modIso) {
     try { $modIso = [string]$entry.ModifyDate } catch {}
   }
@@ -485,10 +645,12 @@ foreach ($entry in $folder.Items()) {
   $entries += [PSCustomObject]@{
     name = $displayName
     wpdName = $wpdName
+    shellPath = [string]$entry.Path
     kind = $(if ($entry.IsFolder) { 'folder' } else { 'file' })
     size = $itemSize
     modifiedAt = $modIso
     path = $entryPath
+    sourceFolder = $(if ($segments.Count -gt 0) { $segments[$segments.Count - 1] } else { '' })
   }
 }
 
@@ -503,7 +665,305 @@ Write-Output '${JSON_END_MARKER}'
     { timeout: 30000 }
   );
   const parsed = parseMarkedJson(stdout, []);
-  return Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+  const list = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+  return list.map((item) => ({
+    ...item,
+    mediaType: item.kind === 'file' ? classifyMediaType(item.name) : undefined,
+  }));
+}
+
+/**
+ * Recursively scans ALL subfolders on the connected iPhone (Internal Storage, DCIM, 202607_a, 202608_a, 100APPLE, etc.)
+ * and returns a flat, date-sorted unified list so photos & videos are never fragmented across Apple's internal folders!
+ */
+async function scanIphoneMedia(deviceId) {
+  if (typeof deviceId !== 'string' || !deviceId.includes(':')) {
+    throw new Error('Identifiant de périphérique iPhone invalide.');
+  }
+  const sepIndex = deviceId.indexOf(':');
+  const backend = deviceId.slice(0, sepIndex);
+  const deviceKey = deviceId.slice(sepIndex + 1);
+
+  if (backend !== 'wpd') {
+    throw new Error('Déverrouillez votre iPhone et validez « Autoriser » pour charger la bibliothèque.');
+  }
+
+  const ps = `
+$payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:OPENFS_PAYLOAD_B64))
+$payload = $payloadJson | ConvertFrom-Json
+$devKey = [string]$payload.deviceKey
+
+$shell = New-Object -ComObject Shell.Application
+$computer = $shell.Namespace(17)
+$deviceItem = $null
+
+foreach ($it in $computer.Items()) {
+  if (([string]$it.Path -eq $devKey) -or ([string]$it.Name -eq $devKey)) {
+    $deviceItem = $it
+    break
+  }
+}
+
+if (-not $deviceItem) {
+  foreach ($it in $computer.Items()) {
+    if (([string]$it.Path -match 'vid_05ac') -or ([string]$it.Name -match 'iPhone|iPad|Apple')) {
+      $deviceItem = $it
+      break
+    }
+  }
+}
+
+if (-not $deviceItem) {
+  throw "iPhone introuvable dans Windows WPD."
+}
+
+$rootFolder = $deviceItem.GetFolder
+if ($null -eq $rootFolder) {
+  throw "Stockage iPhone verrouillé. Déverrouillez votre iPhone et validez Autoriser."
+}
+
+$results = New-Object System.Collections.Generic.List[object]
+
+function Scan-WpdFolder($folderObj, [string]$prefix, [string]$parentFolderName, [int]$depth) {
+  if ($null -eq $folderObj -or $depth -gt 4) { return }
+  $items = $null
+  try { $items = $folderObj.Items() } catch { return }
+  if ($null -eq $items) { return }
+
+  foreach ($entry in $items) {
+    try {
+      $wpdName = [string]$entry.Name
+      $nextPath = $(if ($prefix) { $prefix + '/' + $wpdName } else { $wpdName })
+
+      if ($entry.IsFolder) {
+        $sub = $null
+        try { $sub = $entry.GetFolder } catch {}
+        if ($null -ne $sub) {
+          Scan-WpdFolder $sub $nextPath $wpdName ($depth + 1)
+        }
+      } else {
+        $displayName = $wpdName
+        try {
+          $extName = [string]$entry.ExtendedProperty("System.FileName")
+          if ($extName -and $extName.Trim().Length -gt 0) {
+            $displayName = $extName.Trim()
+          }
+        } catch {}
+
+        # Skip Apple .AAE sidecar edit metadata files
+        if ($displayName -match '\\.aae$') { continue }
+
+        $itemSize = [int64]0
+        try {
+          $extSize = $entry.ExtendedProperty("System.Size")
+          if ($null -ne $extSize -and [int64]$extSize -gt 0) {
+            $itemSize = [int64]$extSize
+          }
+        } catch {}
+        if ($itemSize -le 0) {
+          try { $itemSize = [int64]$entry.Size } catch {}
+        }
+
+        $dateIso = ''
+        try {
+          $dt = $entry.ExtendedProperty("System.Photo.DateTaken")
+          if ($null -ne $dt) { $dateIso = ([datetime]$dt).ToString('o') }
+        } catch {}
+        if (-not $dateIso) {
+          try {
+            $dt = $entry.ExtendedProperty("System.Media.DateEncoded")
+            if ($null -ne $dt) { $dateIso = ([datetime]$dt).ToString('o') }
+          } catch {}
+        }
+        if (-not $dateIso) {
+          try {
+            $dt = $entry.ExtendedProperty("System.DateModified")
+            if ($null -ne $dt) { $dateIso = ([datetime]$dt).ToString('o') }
+          } catch {}
+        }
+        if (-not $dateIso) {
+          try {
+            $md = $entry.ModifyDate
+            if ($null -ne $md) { $dateIso = ([datetime]$md).ToString('o') }
+          } catch {}
+        }
+
+        $results.Add([PSCustomObject]@{
+          name = $displayName
+          wpdName = $wpdName
+          shellPath = [string]$entry.Path
+          kind = 'file'
+          size = $itemSize
+          modifiedAt = $dateIso
+          path = $nextPath
+          sourceFolder = $parentFolderName
+        })
+      }
+    } catch {}
+  }
+}
+
+Scan-WpdFolder $rootFolder '' '' 0
+
+Write-Output '${JSON_START_MARKER}'
+ConvertTo-Json -InputObject @($results) -Depth 4 -Compress
+Write-Output '${JSON_END_MARKER}'
+`;
+
+  const { stdout } = await runPowerShellEncoded(
+    ps,
+    { deviceKey },
+    { timeout: 60000 }
+  );
+
+  const parsed = parseMarkedJson(stdout, []);
+  const rawList = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+
+  const enriched = rawList.map((item) => {
+    const mediaType = classifyMediaType(item.name);
+    let dateStr = item.modifiedAt || '';
+    const parsedTime = dateStr ? Date.parse(dateStr) : NaN;
+    if (!dateStr || Number.isNaN(parsedTime) || parsedTime < Date.UTC(2000, 0, 1)) {
+      dateStr = inferDateFromFolderName(item.sourceFolder) || new Date().toISOString();
+    }
+    return {
+      ...item,
+      modifiedAt: dateStr,
+      mediaType,
+    };
+  });
+
+  // Sort newest first by publication/capture date
+  enriched.sort((a, b) => {
+    const ta = Date.parse(a.modifiedAt || '') || 0;
+    const tb = Date.parse(b.modifiedAt || '') || 0;
+    if (tb !== ta) return tb - ta;
+    return String(b.name || '').localeCompare(String(a.name || ''), 'fr', { numeric: true });
+  });
+
+  return enriched;
+}
+
+/**
+ * Generates Windows Shell thumbnails (JPEG) for a batch of WPD shellPaths or local PC file paths.
+ * Uses IShellItemImageFactory so JPG, PNG, HEIC, MOV, MP4, and PDF all produce crisp real thumbnails!
+ * Returns a map: { [itemKey]: localJpgFilePath }
+ */
+async function generateThumbnailsBatch(items, maxSize = 360) {
+  if (process.platform !== 'win32' || !Array.isArray(items) || items.length === 0) {
+    return {};
+  }
+
+  ensureCacheDirs();
+
+  const result = {};
+  const toGenerate = [];
+
+  for (const item of items) {
+    if (!item || !item.key || !item.shellPath) continue;
+    const outPath = path.join(THUMB_CACHE_ROOT, `${hashKey(`${item.key}|${maxSize}`)}.jpg`);
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 200) {
+      result[item.key] = outPath;
+    } else {
+      toGenerate.push({
+        key: String(item.key),
+        shellPath: String(item.shellPath),
+        outPath,
+      });
+    }
+  }
+
+  if (toGenerate.length === 0) {
+    return result;
+  }
+
+  const ps = `
+${CSHARP_THUMB_HELPER}
+$payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:OPENFS_PAYLOAD_B64))
+$payload = $payloadJson | ConvertFrom-Json
+$items = @($payload.items)
+$maxSize = [int]$payload.maxSize
+$generated = @{}
+
+foreach ($item in $items) {
+  try {
+    $sp = [string]$item.shellPath
+    $outFile = [string]$item.outPath
+    # 0x09 = SIIGBF_BIGGERSIZEOK | SIIGBF_THUMBNAILONLY (real thumbnail, avoids generic icon)
+    $ok = [OpenFsThumbExtractor]::SaveThumbnail($sp, $outFile, $maxSize, 9)
+    if (-not $ok) {
+      # Retry with SIIGBF_RESIZETOFIT | SIIGBF_THUMBNAILONLY (0x08)
+      $ok = [OpenFsThumbExtractor]::SaveThumbnail($sp, $outFile, $maxSize, 8)
+    }
+    if ($ok -and (Test-Path -LiteralPath $outFile)) {
+      $generated[[string]$item.key] = $outFile
+    }
+  } catch {}
+}
+
+Write-Output '${JSON_START_MARKER}'
+ConvertTo-Json -InputObject $generated -Depth 3 -Compress
+Write-Output '${JSON_END_MARKER}'
+`;
+
+  try {
+    const { stdout } = await runPowerShellEncoded(
+      ps,
+      { items: toGenerate, maxSize },
+      { timeout: 30000 }
+    );
+    const parsed = parseMarkedJson(stdout, {});
+    if (parsed && typeof parsed === 'object') {
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === 'string' && fs.existsSync(v)) {
+          result[k] = v;
+        }
+      }
+    }
+  } catch {
+    // Gracefully return whatever cached thumbs we already have
+  }
+
+  return result;
+}
+
+async function convertLocalHeicToJpg(localPath) {
+  ensureCacheDirs();
+  const stat = fs.statSync(localPath);
+  const outJpg = path.join(
+    PREVIEW_CACHE_ROOT,
+    `heic_${hashKey(`${localPath}|${stat.size}|${stat.mtimeMs}`)}.jpg`
+  );
+  if (fs.existsSync(outJpg) && fs.statSync(outJpg).size > 500) {
+    return outJpg;
+  }
+
+  const ps = `
+${CSHARP_THUMB_HELPER}
+$payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($env:OPENFS_PAYLOAD_B64))
+$payload = $payloadJson | ConvertFrom-Json
+$src = [string]$payload.src
+$dst = [string]$payload.dst
+# 0x01 = SIIGBF_BIGGERSIZEOK (asks Windows HEIF/WIC codec for high-res rendered image)
+$ok = [OpenFsThumbExtractor]::SaveThumbnail($src, $dst, 1920, 1)
+if (-not $ok) {
+  $ok = [OpenFsThumbExtractor]::SaveThumbnail($src, $dst, 1280, 0)
+}
+Write-Output '${JSON_START_MARKER}'
+ConvertTo-Json -InputObject ([PSCustomObject]@{ ok = $ok; path = $dst }) -Compress
+Write-Output '${JSON_END_MARKER}'
+`;
+
+  try {
+    const { stdout } = await runPowerShellEncoded(ps, { src: localPath, dst: outJpg }, { timeout: 25000 });
+    const parsed = parseMarkedJson(stdout, { ok: false });
+    if (parsed?.ok && fs.existsSync(outJpg)) {
+      return outJpg;
+    }
+  } catch {
+    // Fall through
+  }
+  return null;
 }
 
 async function copyWpdItemToPc(deviceKey, relativePath, destPcDir) {
@@ -592,10 +1052,9 @@ if (-not $destFolder) { throw "Dossier destination PC introuvable : $destDir" }
 # 16 = Yes to all, 4 = No progress dialog, 1024 = No error dialog
 $destFolder.CopyHere($sourceItem, 1044)
 
-# Wait briefly for Windows Shell async transfer completion
 $expectedPath = Join-Path $destDir $realFileName
 $fallbackPath = Join-Path $destDir $targetName
-$maxWaitMs = 20000
+$maxWaitMs = 45000
 $waited = 0
 $lastSize = -1
 $stableTicks = 0
@@ -627,7 +1086,7 @@ while ($waited -lt $maxWaitMs) {
 
 $finalOut = $(if (Test-Path -LiteralPath $expectedPath) { $expectedPath } elseif (Test-Path -LiteralPath $fallbackPath) { $fallbackPath } else { $expectedPath })
 Write-Output '${JSON_START_MARKER}'
-[PSCustomObject]@{ copiedPath = $finalOut } | ConvertTo-Json -Compress
+ConvertTo-Json -InputObject ([PSCustomObject]@{ copiedPath = $finalOut }) -Compress
 Write-Output '${JSON_END_MARKER}'
 `;
 
@@ -644,6 +1103,126 @@ Write-Output '${JSON_END_MARKER}'
 
   const parsed = parseMarkedJson(stdout, { copiedPath: path.join(resolvedDest, targetName) });
   return parsed?.copiedPath || path.join(resolvedDest, targetName);
+}
+
+/**
+ * Prepares a local file (either on PC or cached from iPhone WPD) for high-quality inline preview inside Electron.
+ */
+async function buildLocalPreviewDescriptor(localPath, displayName) {
+  const safePath = path.resolve(localPath);
+  if (!fs.existsSync(safePath)) {
+    throw new Error('Fichier introuvable pour la prévisualisation.');
+  }
+  const stat = fs.statSync(safePath);
+  const name = displayName || path.basename(safePath);
+  const mimeType = inferMimeFromExt(name);
+  const lower = name.toLowerCase();
+
+  // Text / code / JSON / Markdown files -> return UTF-8 text directly
+  const isText =
+    mimeType.startsWith('text/') ||
+    mimeType === 'application/json' ||
+    mimeType === 'application/xml' ||
+    /\.(txt|md|json|csv|log|xml|plist|ini|cfg|env|js|ts|tsx|py|sh|bat)$/i.test(lower);
+
+  if (isText && stat.size <= 2 * 1024 * 1024) {
+    const textContent = await fs.promises.readFile(safePath, 'utf8');
+    return {
+      previewKind: 'text',
+      localPath: safePath,
+      mimeType,
+      size: stat.size,
+      textContent,
+    };
+  }
+
+  // HEIC / HEIF -> convert to crisp HD JPEG via Windows Shell / WIC so Electron <img> renders it natively!
+  if (/\.(heic|heif)$/i.test(lower)) {
+    const convertedJpg = await convertLocalHeicToJpg(safePath);
+    if (convertedJpg) {
+      return {
+        previewKind: 'image',
+        localPath: convertedJpg,
+        originalPath: safePath,
+        mimeType: 'image/jpeg',
+        size: stat.size,
+      };
+    }
+  }
+
+  if (mimeType.startsWith('image/')) {
+    return {
+      previewKind: 'image',
+      localPath: safePath,
+      mimeType,
+      size: stat.size,
+    };
+  }
+
+  if (mimeType.startsWith('video/')) {
+    return {
+      previewKind: 'video',
+      localPath: safePath,
+      mimeType,
+      size: stat.size,
+    };
+  }
+
+  if (mimeType.startsWith('audio/')) {
+    return {
+      previewKind: 'audio',
+      localPath: safePath,
+      mimeType,
+      size: stat.size,
+    };
+  }
+
+  if (mimeType === 'application/pdf') {
+    return {
+      previewKind: 'pdf',
+      localPath: safePath,
+      mimeType,
+      size: stat.size,
+    };
+  }
+
+  return {
+    previewKind: 'unsupported',
+    localPath: safePath,
+    mimeType,
+    size: stat.size,
+  };
+}
+
+async function prepareIphonePreview(deviceId, relativePath, displayName) {
+  if (typeof deviceId !== 'string' || !deviceId.includes(':')) {
+    throw new Error('Identifiant iPhone invalide.');
+  }
+  const sepIndex = deviceId.indexOf(':');
+  const backend = deviceId.slice(0, sepIndex);
+  const deviceKey = deviceId.slice(sepIndex + 1);
+
+  if (backend !== 'wpd') {
+    throw new Error('Prévisualisation disponible une fois l’iPhone déverrouillé.');
+  }
+
+  ensureCacheDirs();
+  const cacheSubdir = path.join(PREVIEW_CACHE_ROOT, hashKey(`${deviceId}|${relativePath}`));
+  fs.mkdirSync(cacheSubdir, { recursive: true });
+
+  // Check if we already cached this exact iPhone file
+  const existingFiles = fs.readdirSync(cacheSubdir).filter((f) => !f.startsWith('heic_'));
+  let cachedFilePath = existingFiles.length > 0 ? path.join(cacheSubdir, existingFiles[0]) : null;
+
+  if (!cachedFilePath || !fs.existsSync(cachedFilePath) || fs.statSync(cachedFilePath).size === 0) {
+    cachedFilePath = await copyWpdItemToPc(deviceKey, relativePath, cacheSubdir);
+  }
+
+  return buildLocalPreviewDescriptor(cachedFilePath, displayName);
+}
+
+async function preparePcPreview(filePath) {
+  return buildLocalPreviewDescriptor(filePath);
 }
 
 async function listIphoneDirectory(deviceId, relativePath = '') {
@@ -693,15 +1272,19 @@ async function listPcDirectory(dirPath) {
   const results = [];
 
   for (const dirent of dirents) {
+    if (dirent.name.toLowerCase() === 'desktop.ini' || dirent.name.startsWith('~$')) continue;
     const fullPath = path.join(targetDir, dirent.name);
     try {
       const stat = await fs.promises.stat(fullPath);
+      const isDir = dirent.isDirectory();
       results.push({
         name: dirent.name,
-        kind: dirent.isDirectory() ? 'folder' : 'file',
-        size: stat.size,
+        shellPath: fullPath,
+        kind: isDir ? 'folder' : 'file',
+        size: isDir ? 0 : stat.size,
         modifiedAt: stat.mtime.toISOString(),
         path: fullPath,
+        mediaType: isDir ? undefined : classifyMediaType(dirent.name),
       });
     } catch {
       // Skip unreadable OS system entries
@@ -710,6 +1293,11 @@ async function listPcDirectory(dirPath) {
 
   results.sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1;
+    if (a.kind === 'file') {
+      const ta = Date.parse(a.modifiedAt || '') || 0;
+      const tb = Date.parse(b.modifiedAt || '') || 0;
+      if (tb !== ta) return tb - ta;
+    }
     return a.name.localeCompare(b.name, 'fr', { numeric: true, sensitivity: 'base' });
   });
 
@@ -718,8 +1306,13 @@ async function listPcDirectory(dirPath) {
 
 module.exports = {
   getDefaultSyncDir,
+  getSystemFolder,
   listIphoneDevices,
   listIphoneDirectory,
+  scanIphoneMedia,
+  generateThumbnailsBatch,
+  prepareIphonePreview,
+  preparePcPreview,
   copyFromIphoneToPc,
   listPcDirectory,
 };

@@ -1,22 +1,12 @@
-import { useEffect, useState } from 'react';
-import {
-  ArrowLeft,
-  Check,
-  Download,
-  File as FileIcon,
-  Folder,
-  RefreshCw,
-} from 'lucide-react';
+import { Check, RefreshCw } from 'lucide-react';
 import {
   isWebUsbSupported,
   type ConnectedUsbDeviceInfo,
 } from '../lib/webUsbBridge';
 import {
   getDesktopBridge,
-  type DesktopFsEntry,
   type DesktopIphoneDevice,
 } from '../lib/desktopBridge';
-import { formatBytes } from '../lib/fsUtils';
 
 interface UsbBridgeViewProps {
   usbDevice: ConnectedUsbDeviceInfo | null;
@@ -60,82 +50,6 @@ export function UsbBridgeView({
 }: UsbBridgeViewProps) {
   const desktopBridge = getDesktopBridge();
   const webUsbOk = isWebUsbSupported();
-
-  // Optional quick folder browser on Pont USB-C when a native WPD device is ready
-  const [nativePath, setNativePath] = useState<string>('');
-  const [nativeEntries, setNativeEntries] = useState<DesktopFsEntry[]>([]);
-  const [browseBusy, setBrowseBusy] = useState(false);
-  const [browseStatus, setBrowseStatus] = useState<string | null>(null);
-  const [browseError, setBrowseError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!desktopBridge || !activeNativeDevice || activeNativeDevice.status !== 'ready') {
-      setNativeEntries([]);
-      setNativePath('');
-      return;
-    }
-
-    let cancelled = false;
-    setBrowseBusy(true);
-    setBrowseError(null);
-    desktopBridge
-      .listIphoneDirectory(activeNativeDevice.id, '')
-      .then((entries) => {
-        if (cancelled) return;
-        setNativePath('');
-        setNativeEntries(entries);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setBrowseError(
-          err instanceof Error ? err.message : 'Impossible de lire le stockage iPhone.'
-        );
-      })
-      .finally(() => {
-        if (!cancelled) setBrowseBusy(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [desktopBridge, activeNativeDevice?.id, activeNativeDevice?.status]);
-
-  const openNativePath = async (device: DesktopIphoneDevice, nextPath: string) => {
-    if (!desktopBridge) return;
-    setBrowseBusy(true);
-    setBrowseError(null);
-    try {
-      const entries = await desktopBridge.listIphoneDirectory(device.id, nextPath);
-      setNativePath(nextPath);
-      setNativeEntries(entries);
-    } catch (err) {
-      setBrowseError(
-        err instanceof Error ? err.message : 'Impossible d’ouvrir ce dossier iPhone.'
-      );
-    } finally {
-      setBrowseBusy(false);
-    }
-  };
-
-  const handleCopyNativeItem = async (entry: DesktopFsEntry) => {
-    if (!desktopBridge || !activeNativeDevice) return;
-    setBrowseBusy(true);
-    setBrowseError(null);
-    setBrowseStatus(`Copie de « ${entry.name} » vers votre PC...`);
-    try {
-      const outPath = await desktopBridge.copyFromIphoneToPc(
-        activeNativeDevice.id,
-        entry.path,
-        nativeDestDir || undefined
-      );
-      setBrowseStatus(`Copié : ${outPath}`);
-    } catch (err) {
-      setBrowseError(err instanceof Error ? err.message : 'Échec de la copie vers le PC.');
-      setBrowseStatus(null);
-    } finally {
-      setBrowseBusy(false);
-    }
-  };
 
   const handlePickPcFolder = async () => {
     if (desktopBridge) {
@@ -353,7 +267,9 @@ export function UsbBridgeView({
                 onClick={onOpenDualPaneExplorer}
                 className="w-full py-2.5 px-4 rounded-lg bg-[#1A65C7] hover:bg-[#1557B0] text-white text-sm font-medium transition-colors"
               >
-                Ouvrir le double panneau
+                {desktopBridge && isNativeReady
+                  ? 'Ouvrir mes photos et vidéos'
+                  : 'Ouvrir le double panneau'}
               </button>
             </div>
           </div>
@@ -400,99 +316,6 @@ export function UsbBridgeView({
             </div>
           ))}
         </div>
-
-        {/* Native Windows WPD Live iPhone Quick Browser (shown inside .exe once unlocked) */}
-        {desktopBridge && activeNativeDevice && activeNativeDevice.status === 'ready' && (
-          <section className="pt-2 space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5 min-w-0">
-                {nativePath && (
-                  <button
-                    type="button"
-                    disabled={browseBusy}
-                    onClick={() => {
-                      const parts = nativePath.split('/').filter(Boolean);
-                      parts.pop();
-                      openNativePath(activeNativeDevice, parts.join('/'));
-                    }}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
-                  >
-                    <ArrowLeft size={13} />
-                    Retour
-                  </button>
-                )}
-                <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
-                  {activeNativeDevice.name}
-                  {nativePath ? ` · /${nativePath}` : ''}
-                </h3>
-              </div>
-
-              {browseBusy && <RefreshCw size={13} className="animate-spin text-slate-400 shrink-0" />}
-            </div>
-
-            {browseStatus && (
-              <p className="text-xs text-emerald-700 dark:text-emerald-400">{browseStatus}</p>
-            )}
-            {browseError && (
-              <p className="text-xs text-red-600 dark:text-red-400">{browseError}</p>
-            )}
-
-            {nativeEntries.length === 0 && !browseBusy ? (
-              <div className="rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 p-8 text-center text-sm text-slate-500 dark:text-slate-400">
-                Ce dossier iPhone est vide.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {nativeEntries.map((entry) => (
-                  <div
-                    key={entry.path}
-                    className="rounded-xl border border-slate-200/90 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 py-3 flex items-center justify-between gap-3 hover:border-slate-300 dark:hover:border-slate-700 transition-colors"
-                  >
-                    <button
-                      type="button"
-                      disabled={entry.kind !== 'folder' || browseBusy}
-                      onClick={() => {
-                        if (entry.kind === 'folder') {
-                          openNativePath(activeNativeDevice, entry.path);
-                        }
-                      }}
-                      className="flex items-center gap-3 min-w-0 flex-1 text-left disabled:cursor-default"
-                    >
-                      {entry.kind === 'folder' ? (
-                        <Folder
-                          size={20}
-                          className="text-[#1A65C7] fill-[#1A65C7]/90 dark:text-blue-400 dark:fill-blue-400/80 shrink-0"
-                        />
-                      ) : (
-                        <FileIcon size={18} className="text-slate-400 shrink-0" />
-                      )}
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
-                          {entry.name}
-                        </div>
-                        {entry.kind === 'file' && entry.size > 0 && (
-                          <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                            {formatBytes(entry.size)}
-                          </div>
-                        )}
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={browseBusy}
-                      onClick={() => handleCopyNativeItem(entry)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#1A65C7] text-white hover:bg-[#1557B0] disabled:opacity-50 transition-colors shrink-0"
-                    >
-                      <Download size={13} />
-                      Copier vers PC
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        )}
       </div>
     </div>
   );

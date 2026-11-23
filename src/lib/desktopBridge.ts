@@ -15,10 +15,26 @@ export interface DesktopIphoneDevice {
 export interface DesktopFsEntry {
   name: string;
   wpdName?: string;
+  shellPath?: string;
   kind: 'folder' | 'file';
   size: number;
   modifiedAt: string;
   path: string;
+  sourceFolder?: string;
+  mediaType?: 'photo' | 'video' | 'audio' | 'document' | 'sidecar';
+}
+
+export interface DesktopThumbnailRequest {
+  key: string;
+  shellPath: string;
+}
+
+export interface DesktopPreviewResult {
+  previewKind: 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'unsupported';
+  url: string;
+  mimeType: string;
+  size: number;
+  textContent?: string;
 }
 
 export interface OpenFSDesktopAPI {
@@ -26,6 +42,17 @@ export interface OpenFSDesktopAPI {
   platform: string;
   listIphoneDevices: () => Promise<DesktopIphoneDevice[]>;
   listIphoneDirectory: (deviceId: string, relativePath?: string) => Promise<DesktopFsEntry[]>;
+  scanIphoneMedia: (deviceId: string) => Promise<DesktopFsEntry[]>;
+  getThumbnailsBatch: (
+    items: DesktopThumbnailRequest[],
+    maxSize?: number
+  ) => Promise<Record<string, string>>;
+  prepareIphonePreview: (
+    deviceId: string,
+    relativePath: string,
+    displayName?: string
+  ) => Promise<DesktopPreviewResult>;
+  preparePcPreview: (filePath: string) => Promise<DesktopPreviewResult>;
   copyFromIphoneToPc: (
     deviceId: string,
     relativePath: string,
@@ -34,6 +61,7 @@ export interface OpenFSDesktopAPI {
   pickPcDirectory: () => Promise<string | null>;
   listPcDirectory: (dirPath?: string) => Promise<DesktopFsEntry[]>;
   getDefaultSyncDir: () => Promise<string>;
+  getSystemFolder: (kind: 'documents' | 'downloads' | 'sync') => Promise<string>;
   openInExplorer: (targetPath?: string) => Promise<boolean>;
 }
 
