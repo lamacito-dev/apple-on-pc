@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowDownUp,
   ArrowLeft,
   Calendar,
   Check,
@@ -38,6 +39,7 @@ interface NativeMediaWorkspaceProps {
 type MediaFilter = 'all' | 'photo' | 'video';
 type DisplayLayout = 'grid' | 'list' | 'folders';
 type GroupGranularity = 'month' | 'day';
+type SortDirection = 'desc' | 'asc';
 
 interface DateGroup {
   key: string;
@@ -124,6 +126,7 @@ export function NativeMediaWorkspace({
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
   const [layout, setLayout] = useState<DisplayLayout>('grid');
   const [granularity, setGranularity] = useState<GroupGranularity>('month');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   // Selection keyed strictly by unique entryKey (shellPath || path)
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
 
@@ -135,6 +138,13 @@ export function NativeMediaWorkspace({
 
   // Thumbnail URL cache keyed strictly by unique entryKey (shellPath || path)
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  const [brokenThumbs, setBrokenThumbs] = useState<Record<string, boolean>>({});
+  const [thumbProgress, setThumbProgress] = useState<{ active: boolean; done: number; total: number }>({
+    active: false,
+    done: 0,
+    total: 0,
+  });
+  const [thumbReloadNonce, setThumbReloadNonce] = useState(0);
   const requestedThumbsRef = useRef<Set<string>>(new Set());
 
   // Inline Preview state
@@ -170,6 +180,7 @@ export function NativeMediaWorkspace({
   useEffect(() => {
     requestedThumbsRef.current.clear();
     setThumbs({});
+    setBrokenThumbs({});
     setPreviewEntry(null);
     loadAllMedia();
   }, [loadAllMedia]);
@@ -206,7 +217,7 @@ export function NativeMediaWorkspace({
 
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return allMedia.filter((item) => {
+    const list = allMedia.filter((item) => {
       if (mediaFilter === 'photo' && item.mediaType !== 'photo') return false;
       if (mediaFilter === 'video' && item.mediaType !== 'video') return false;
       if (mediaFilter === 'all' && item.mediaType !== 'photo' && item.mediaType !== 'video') {
@@ -215,7 +226,8 @@ export function NativeMediaWorkspace({
       if (q && !item.name.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [allMedia, mediaFilter, searchQuery]);
+    return sortDirection === 'desc' ? list : [...list].reverse();
+  }, [allMedia, mediaFilter, searchQuery, sortDirection]);
 
   const dateGroups = useMemo<DateGroup[]>(() => {
     const map = new Map<string, DateGroup>();
@@ -230,24 +242,39 @@ export function NativeMediaWorkspace({
       if (item.mediaType === 'video') group.videoCount += 1;
       else group.photoCount += 1;
     }
-    return Array.from(map.values()).sort((a, b) => b.key.localeCompare(a.key));
-  }, [filteredItems, granularity]);
+    return Array.from(map.values()).sort((a, b) =>
+      sortDirection === 'desc' ? b.key.localeCompare(a.key) : a.key.localeCompare(b.key)
+    );
+  }, [filteredItems, granularity, sortDirection]);
 
-  // Progressive batch thumbnail loading keyed strictly by unique shellPath
+  const handleRetryMissingThumbs = useCallback(() => {
+    const nextRequested = new Set<string>();
+    for (const [k, url] of Object.entries(thumbs)) {
+      if (url && !brokenThumbs[k]) {
+        nextRequested.add(k);
+      }
+    }
+    requestedThumbsRef.current = nextRequested;
+    setBrokenThumbs({});
+    setThumbReloadNonce((n) => n + 1);
+  }, [thumbs, brokenThumbs]);
+
+  // Progressive batch thumbnail loading keyed strictly by unique shellPath (8 items/batch for instant first-row paint)
   useEffect(() => {
     if (!bridge || layout === 'folders') return;
-    const pending = filteredItems
-      .filter((item) => {
-        const k = getEntryKey(item);
-        return Boolean(item.shellPath) && !requestedThumbsRef.current.has(k);
-      })
-      .slice(0, 160);
+    const pending = filteredItems.filter((item) => {
+      const k = getEntryKey(item);
+      return Boolean(item.shellPath) && !requestedThumbsRef.current.has(k);
+    });
 
     if (pending.length === 0) return;
 
     let cancelled = false;
     const runBatches = async () => {
-      const BATCH_SIZE = 16;
+      const BATCH_SIZE = 8;
+      setThumbProgress({ active: true, done: 0, total: pending.length });
+      let processed = 0;
+
       for (let i = 0; i < pending.length; i += BATCH_SIZE) {
         if (cancelled) return;
         const batch = pending.slice(i, i + BATCH_SIZE);
@@ -262,7 +289,16 @@ export function NativeMediaWorkspace({
           }
         } catch (err) {
           console.warn('[OpenFS] Lot vignettes partiel:', err);
+        } finally {
+          processed += batch.length;
+          if (!cancelled) {
+            setThumbProgress({ active: true, done: processed, total: pending.length });
+          }
         }
+      }
+
+      if (!cancelled) {
+        setThumbProgress({ active: false, done: pending.length, total: pending.length });
       }
     };
 
@@ -270,7 +306,7 @@ export function NativeMediaWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [bridge, filteredItems, layout]);
+  }, [bridge, filteredItems, layout, thumbReloadNonce]);
 
   const totalSize = useMemo(
     () => filteredItems.reduce((acc, item) => acc + (item.size || 0), 0),
@@ -437,6 +473,9 @@ export function NativeMediaWorkspace({
         onExportToPc={async (entry) => {
           await handleCopyItemsToPc([entry]);
         }}
+        onPreviewImageReady={(key, url) => {
+          setThumbs((prev) => (prev[key] ? prev : { ...prev, [key]: url }));
+        }}
         onToast={onToast}
       />
     );
@@ -454,7 +493,11 @@ export function NativeMediaWorkspace({
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
               {loading
                 ? 'Analyse de la photothèque réelle...'
-                : `${filteredItems.length} élément${filteredItems.length > 1 ? 's' : ''} · ${formatBytes(totalSize)} · Classés par date`}
+                : `${filteredItems.length} élément${filteredItems.length > 1 ? 's' : ''} · ${formatBytes(totalSize)} · Ordre chronologique${
+                    thumbProgress.active
+                      ? ` · Miniatures ${thumbProgress.done}/${thumbProgress.total}...`
+                      : ''
+                  }`}
             </p>
           </div>
 
@@ -486,15 +529,41 @@ export function NativeMediaWorkspace({
 
         <div className="flex items-center gap-2 shrink-0">
           {layout !== 'folders' && (
-            <button
-              type="button"
-              onClick={() => setGranularity((g) => (g === 'month' ? 'day' : 'month'))}
-              title="Basculer entre classement par mois ou par jour"
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
-            >
-              <Calendar size={13} />
-              {granularity === 'month' ? 'Par mois' : 'Par jour'}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => setSortDirection((d) => (d === 'desc' ? 'asc' : 'desc'))}
+                title="Inverser l’ordre chronologique (plus récent / plus ancien)"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+              >
+                <ArrowDownUp size={13} />
+                {sortDirection === 'desc' ? 'Plus récent' : 'Plus ancien'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setGranularity((g) => (g === 'month' ? 'day' : 'month'))}
+                title="Basculer entre classement par mois ou par jour"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+              >
+                <Calendar size={13} />
+                {granularity === 'month' ? 'Par mois' : 'Par jour'}
+              </button>
+
+              {!thumbProgress.active &&
+                filteredItems.length > 0 &&
+                filteredItems.some((item) => item.shellPath && (!thumbs[getEntryKey(item)] || brokenThumbs[getEntryKey(item)])) && (
+                  <button
+                    type="button"
+                    onClick={handleRetryMissingThumbs}
+                    title="Relancer l’extraction des miniatures manquantes"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap"
+                  >
+                    <ImageIcon size={13} />
+                    Miniatures
+                  </button>
+                )}
+            </>
           )}
 
           <div className="inline-flex items-center p-0.5 rounded-lg bg-slate-100 dark:bg-slate-800/90">
@@ -766,8 +835,10 @@ export function NativeMediaWorkspace({
             </div>
           </div>
         ) : error ? (
-          <div className="max-w-lg mx-auto mt-10 rounded-2xl border border-red-200 dark:border-red-900/50 bg-white dark:bg-slate-900 p-6 text-center space-y-3">
-            <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+          <div className="max-w-xl mx-auto mt-10 rounded-2xl border border-red-200 dark:border-red-900/50 bg-white dark:bg-slate-900 p-6 text-center space-y-4 overflow-hidden">
+            <p className="text-sm text-red-600 dark:text-red-400 whitespace-pre-wrap break-words text-left max-h-60 overflow-y-auto">
+              {error}
+            </p>
             <button
               type="button"
               onClick={loadAllMedia}
@@ -840,11 +911,14 @@ export function NativeMediaWorkspace({
                             }`}
                           >
                             <div className="relative aspect-[4/3] bg-slate-100 dark:bg-slate-800/70 overflow-hidden flex items-center justify-center">
-                              {thumbUrl ? (
+                              {thumbUrl && !brokenThumbs[key] ? (
                                 <img
                                   src={thumbUrl}
                                   alt={item.name}
                                   loading="lazy"
+                                  onError={() =>
+                                    setBrokenThumbs((prev) => ({ ...prev, [key]: true }))
+                                  }
                                   className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
                                 />
                               ) : isVideo ? (
@@ -930,11 +1004,14 @@ export function NativeMediaWorkspace({
                             </button>
 
                             <div className="w-16 h-12 rounded-lg bg-slate-100 dark:bg-slate-800 overflow-hidden flex items-center justify-center shrink-0 relative">
-                              {thumbUrl ? (
+                              {thumbUrl && !brokenThumbs[key] ? (
                                 <img
                                   src={thumbUrl}
                                   alt={item.name}
                                   loading="lazy"
+                                  onError={() =>
+                                    setBrokenThumbs((prev) => ({ ...prev, [key]: true }))
+                                  }
                                   className="w-full h-full object-cover"
                                 />
                               ) : isVideo ? (

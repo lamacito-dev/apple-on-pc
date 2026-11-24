@@ -33,6 +33,43 @@ function hashKey(input) {
   return crypto.createHash('sha1').update(String(input || '')).digest('hex');
 }
 
+function cleanPowerShellError(rawStderr, fallbackMessage) {
+  const raw = String(rawStderr || '').trim();
+  if (!raw) return String(fallbackMessage || 'Erreur PowerShell inconnue.');
+
+  if (raw.startsWith('#< CLIXML') || raw.includes('<Objs Version=')) {
+    const errorLines = [];
+    const errRegex = /<S S="Error">([\s\S]*?)<\/S>/g;
+    let match;
+    while ((match = errRegex.exec(raw)) !== null) {
+      const decoded = match[1]
+        .replace(/_x000D__x000A_/g, '\n')
+        .replace(/_x000A_/g, '\n')
+        .replace(/_x0009_/g, ' ')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .trim();
+      if (decoded) errorLines.push(decoded);
+    }
+    if (errorLines.length > 0) {
+      return errorLines.join('\n').trim();
+    }
+    // Fallback: strip XML tags if stderr only contained non-Error CLIXML records
+    const stripped = raw
+      .replace(/^#< CLIXML\s*/i, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/_x000D__x000A_/g, '\n')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return stripped || String(fallbackMessage || 'Erreur PowerShell.');
+  }
+
+  return raw;
+}
+
 function runCommand(cmd, args, options = {}) {
   return new Promise((resolve, reject) => {
     execFile(
@@ -41,13 +78,13 @@ function runCommand(cmd, args, options = {}) {
       {
         windowsHide: true,
         encoding: 'utf8',
-        maxBuffer: 40 * 1024 * 1024,
+        maxBuffer: 64 * 1024 * 1024,
         timeout: options.timeout ?? 30000,
         env: options.env ? { ...process.env, ...options.env } : process.env,
       },
       (error, stdout, stderr) => {
         if (error) {
-          const msg = String(stderr || '').trim() || error.message;
+          const msg = cleanPowerShellError(stderr, error.message);
           reject(new Error(msg));
           return;
         }
@@ -57,12 +94,31 @@ function runCommand(cmd, args, options = {}) {
   });
 }
 
+// Bulletproof PowerShell 5.1 JSON serializer:
+// Uses .NET JavaScriptSerializer with MaxJsonLength = MaxValue on hashtables/ArrayLists
+// to completely avoid BOTH PS 5.1 ConvertTo-Json ArgumentException AND the 2 MB truncation limit.
+const PS_JSON_HELPER = `
+function ConvertTo-OpenFsJson($obj) {
+  try {
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+    $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $ser.MaxJsonLength = [int]::MaxValue
+    $ser.RecursionLimit = 64
+    return $ser.Serialize($obj)
+  } catch {
+    return (ConvertTo-Json -InputObject $obj -Depth 5 -Compress)
+  }
+}
+`;
+
 function runPowerShellEncoded(script, payload = null, options = {}) {
   const preamble = [
+    '$ProgressPreference = "SilentlyContinue"',
     '[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)',
     '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
     '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
     '$ErrorActionPreference = "Stop"',
+    PS_JSON_HELPER,
   ].join('\n');
 
   const fullScript = `${preamble}\n${script}`;
@@ -222,12 +278,16 @@ function inferDateFromFolderName(folderName) {
   return `${match[1]}-${match[2]}-01T12:00:00.000Z`;
 }
 
-// Shared C# helper using Windows Shell IShellItemImageFactory (works on WPD Shell paths AND local PC files, including HEIC & MOV/MP4)
+// Shared C# helper using Windows Shell IShellItemImageFactory (works on WPD Shell paths AND local PC files, including HEIC & MOV/MP4).
+// Renders HBITMAP onto a clean 24bpp RGB canvas before JPEG encoding (fixes 32bpp premultiplied ARGB issues)
+// and returns exact HRESULT diagnostics if extraction fails.
 const CSHARP_THUMB_HELPER = `
 $thumbCode = @'
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.IO;
 using System.Runtime.InteropServices;
 
 public static class OpenFsThumbExtractor {
@@ -251,31 +311,91 @@ public static class OpenFsThumbExtractor {
     [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
     IntPtr pbc,
     [In] ref Guid riid,
-    [Out, MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory ppv
+    [Out, MarshalAs(UnmanagedType.IUnknown)] out object ppv
   );
 
   [DllImport("gdi32.dll")]
   [return: MarshalAs(UnmanagedType.Bool)]
   private static extern bool DeleteObject(IntPtr hObject);
 
-  public static bool SaveThumbnail(string parsingPath, string outJpgPath, int maxSize, int flags) {
-    Guid iid = new Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b");
-    IShellItemImageFactory factory = null;
-    IntPtr hBitmap = IntPtr.Zero;
-    try {
-      int hr = SHCreateItemFromParsingName(parsingPath, IntPtr.Zero, ref iid, out factory);
-      if (hr != 0 || factory == null) return false;
-      hr = factory.GetImage(new SIZE(maxSize, maxSize), flags, out hBitmap);
-      if (hr != 0 || hBitmap == IntPtr.Zero) return false;
-      using (Bitmap bmp = Image.FromHbitmap(hBitmap)) {
-        bmp.Save(outJpgPath, ImageFormat.Jpeg);
+  private static ImageCodecInfo GetJpegCodec() {
+    ImageCodecInfo[] codecs = ImageCodecInfo.GetImageEncoders();
+    for (int i = 0; i < codecs.Length; i++) {
+      if (codecs[i].FormatID == ImageFormat.Jpeg.Guid) return codecs[i];
+    }
+    return null;
+  }
+
+  private static void SaveHBitmapAsJpeg(IntPtr hBitmap, string outJpgPath, long quality) {
+    string tmpPath = outJpgPath + ".tmp";
+    using (Bitmap raw = Image.FromHbitmap(hBitmap)) {
+      int w = Math.Max(1, raw.Width);
+      int h = Math.Max(1, raw.Height);
+      using (Bitmap rgb = new Bitmap(w, h, PixelFormat.Format24bppRgb)) {
+        using (Graphics g = Graphics.FromImage(rgb)) {
+          g.Clear(Color.White);
+          g.CompositingQuality = CompositingQuality.HighQuality;
+          g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+          g.SmoothingMode = SmoothingMode.HighQuality;
+          g.DrawImage(raw, 0, 0, w, h);
+        }
+        ImageCodecInfo jpegCodec = GetJpegCodec();
+        if (jpegCodec != null) {
+          using (EncoderParameters ep = new EncoderParameters(1)) {
+            ep.Param[0] = new EncoderParameter(Encoder.Quality, quality);
+            rgb.Save(tmpPath, jpegCodec, ep);
+          }
+        } else {
+          rgb.Save(tmpPath, ImageFormat.Jpeg);
+        }
       }
-      return true;
-    } catch {
-      return false;
+    }
+    if (File.Exists(outJpgPath)) {
+      File.Delete(outJpgPath);
+    }
+    File.Move(tmpPath, outJpgPath);
+  }
+
+  public static string SaveThumbnailWithFallback(string parsingPath, string outJpgPath, int maxSize, int[] flagList, long quality) {
+    Guid iid = new Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+    object rawFactory = null;
+    IShellItemImageFactory factory = null;
+    try {
+      int hr = SHCreateItemFromParsingName(parsingPath, IntPtr.Zero, ref iid, out rawFactory);
+      if (hr != 0 || rawFactory == null) {
+        return string.Format("SHCreateItemFromParsingName failed: 0x{0:X8}", hr);
+      }
+      factory = rawFactory as IShellItemImageFactory;
+      if (factory == null) {
+        return "Cast IShellItemImageFactory returned null";
+      }
+
+      string lastErr = "No flags provided";
+      for (int i = 0; i < flagList.Length; i++) {
+        IntPtr hBitmap = IntPtr.Zero;
+        try {
+          int f = flagList[i];
+          int ghr = factory.GetImage(new SIZE(maxSize, maxSize), f, out hBitmap);
+          if (ghr == 0 && hBitmap != IntPtr.Zero) {
+            SaveHBitmapAsJpeg(hBitmap, outJpgPath, quality);
+            return "";
+          }
+          lastErr = string.Format("GetImage(flags=0x{0:X}) failed: 0x{1:X8}", f, ghr);
+        } catch (Exception ex) {
+          lastErr = "GetImage/Save exception: " + ex.Message;
+        } finally {
+          if (hBitmap != IntPtr.Zero) {
+            DeleteObject(hBitmap);
+          }
+        }
+      }
+      return lastErr;
+    } catch (Exception ex) {
+      return "Extractor exception: " + ex.Message;
     } finally {
-      if (hBitmap != IntPtr.Zero) DeleteObject(hBitmap);
-      if (factory != null) Marshal.ReleaseComObject(factory);
+      if (rawFactory != null && Marshal.IsComObject(rawFactory)) {
+        Marshal.ReleaseComObject(rawFactory);
+      }
     }
   }
 }
@@ -289,9 +409,9 @@ async function detectWindowsDevices() {
   if (process.platform !== 'win32') return [];
 
   const ps = `
-$wpdDevices = New-Object System.Collections.Generic.List[object]
-$pnpDevices = New-Object System.Collections.Generic.List[object]
-$warnings = New-Object System.Collections.Generic.List[string]
+$wpdDevices = New-Object System.Collections.ArrayList
+$pnpDevices = New-Object System.Collections.ArrayList
+$warnings = New-Object System.Collections.ArrayList
 
 try {
   $shell = New-Object -ComObject Shell.Application
@@ -325,7 +445,7 @@ try {
               }
             }
           } catch {
-            $warnings.Add("WPD GetFolder: " + $_.Exception.Message)
+            [void]$warnings.Add("WPD GetFolder: " + $_.Exception.Message)
           }
 
           $vendId = '0x05AC'
@@ -337,7 +457,7 @@ try {
             $prodId = '0x' + $Matches[1].ToUpper()
           }
 
-          $wpdDevices.Add([PSCustomObject]@{
+          [void]$wpdDevices.Add([ordered]@{
             wpdPath = $itemPath
             name = $itemName
             type = $itemType
@@ -348,12 +468,12 @@ try {
           })
         }
       } catch {
-        $warnings.Add("WPD item: " + $_.Exception.Message)
+        [void]$warnings.Add("WPD item: " + $_.Exception.Message)
       }
     }
   }
 } catch {
-  $warnings.Add("WPD shell: " + $_.Exception.Message)
+  [void]$warnings.Add("WPD shell: " + $_.Exception.Message)
 }
 
 try {
@@ -385,7 +505,7 @@ try {
             $serial = $candidate
           }
         }
-        $pnpDevices.Add([PSCustomObject]@{
+        [void]$pnpDevices.Add([ordered]@{
           pnpId = $devId
           name = $pnpName
           pnpClass = $pnpClass
@@ -396,21 +516,21 @@ try {
         })
       }
     } catch {
-      $warnings.Add("PnP item: " + $_.Exception.Message)
+      [void]$warnings.Add("PnP item: " + $_.Exception.Message)
     }
   }
 } catch {
-  $warnings.Add("PnP query: " + $_.Exception.Message)
+  [void]$warnings.Add("PnP query: " + $_.Exception.Message)
 }
 
-$output = [PSCustomObject]@{
-  wpd = [object[]]$wpdDevices.ToArray()
-  pnp = [object[]]$pnpDevices.ToArray()
-  warnings = [string[]]$warnings.ToArray()
+$output = [ordered]@{
+  wpd = $wpdDevices
+  pnp = $pnpDevices
+  warnings = $warnings
 }
 
 Write-Output '${JSON_START_MARKER}'
-ConvertTo-Json -InputObject $output -Depth 5 -Compress
+Write-Output (ConvertTo-OpenFsJson $output)
 Write-Output '${JSON_END_MARKER}'
 `;
 
@@ -623,7 +743,7 @@ foreach ($seg in $segments) {
   }
 }
 
-$entries = New-Object System.Collections.Generic.List[object]
+$entries = New-Object System.Collections.ArrayList
 foreach ($entry in $folder.Items()) {
   $wpdName = [string]$entry.Name
   $displayName = $wpdName
@@ -652,18 +772,28 @@ foreach ($entry in $folder.Items()) {
   }
 
   $modIso = ''
-  foreach ($prop in @("System.Photo.DateTaken", "System.Media.DateEncoded", "System.DateModified")) {
+  foreach ($prop in @("System.Photo.DateTaken", "System.Media.DateEncoded", "System.ItemDate", "System.DateCreated", "System.DateModified")) {
     if ($modIso) { break }
     try {
       $dt = $entry.ExtendedProperty($prop)
-      if ($null -ne $dt) { $modIso = ([datetime]$dt).ToString('o') }
+      if ($null -ne $dt) {
+        $dtVal = [datetime]$dt
+        if ($dtVal.Year -ge 2000 -and $dtVal.Year -le 2100) {
+          $modIso = $dtVal.ToString('o')
+        }
+      }
     } catch {
       # Property may not exist for non-media items
     }
   }
   if (-not $modIso) {
     try {
-      if ($null -ne $entry.ModifyDate) { $modIso = ([datetime]$entry.ModifyDate).ToString('o') }
+      if ($null -ne $entry.ModifyDate) {
+        $mdVal = [datetime]$entry.ModifyDate
+        if ($mdVal.Year -ge 2000 -and $mdVal.Year -le 2100) {
+          $modIso = $mdVal.ToString('o')
+        }
+      }
     } catch {
       $warnings.Add("ModifyDate: " + $_.Exception.Message)
     }
@@ -671,7 +801,7 @@ foreach ($entry in $folder.Items()) {
 
   $entryPath = $(if ($segments.Count -gt 0) { ($segments -join '/') + '/' + $displayName } else { $displayName })
 
-  $entries.Add([PSCustomObject]@{
+  [void]$entries.Add([ordered]@{
     name = $displayName
     wpdName = $wpdName
     shellPath = [string]$entry.Path
@@ -684,11 +814,7 @@ foreach ($entry in $folder.Items()) {
 }
 
 Write-Output '${JSON_START_MARKER}'
-if ($entries.Count -eq 0) {
-  Write-Output '[]'
-} else {
-  ConvertTo-Json -InputObject ([object[]]$entries.ToArray()) -Depth 4 -Compress
-}
+Write-Output (ConvertTo-OpenFsJson $entries)
 Write-Output '${JSON_END_MARKER}'
 `;
 
@@ -755,8 +881,8 @@ if ($null -eq $rootFolder) {
   throw "Stockage iPhone verrouillé. Déverrouillez votre iPhone et validez Autoriser."
 }
 
-$results = New-Object System.Collections.Generic.List[object]
-$warnings = New-Object System.Collections.Generic.List[string]
+$results = New-Object System.Collections.ArrayList
+$warnings = New-Object System.Collections.ArrayList
 
 function Scan-WpdFolder($folderObj, [string]$prefix, [string]$parentFolderName, [int]$depth) {
   if ($null -eq $folderObj -or $depth -gt 4) { return }
@@ -764,7 +890,7 @@ function Scan-WpdFolder($folderObj, [string]$prefix, [string]$parentFolderName, 
   try {
     $items = $folderObj.Items()
   } catch {
-    $warnings.Add("Items($prefix): " + $_.Exception.Message)
+    [void]$warnings.Add("Items($prefix): " + $_.Exception.Message)
     return
   }
   if ($null -eq $items) { return }
@@ -780,7 +906,7 @@ function Scan-WpdFolder($folderObj, [string]$prefix, [string]$parentFolderName, 
         try {
           $sub = $entry.GetFolder
         } catch {
-          $warnings.Add("GetFolder($nextFolderPath): " + $_.Exception.Message)
+          [void]$warnings.Add("GetFolder($nextFolderPath): " + $_.Exception.Message)
         }
         if ($null -ne $sub) {
           Scan-WpdFolder $sub $nextFolderPath $wpdName ($depth + 1)
@@ -793,7 +919,7 @@ function Scan-WpdFolder($folderObj, [string]$prefix, [string]$parentFolderName, 
             $displayName = $extName.Trim()
           }
         } catch {
-          $warnings.Add("FileName($wpdName): " + $_.Exception.Message)
+          [void]$warnings.Add("FileName($wpdName): " + $_.Exception.Message)
         }
 
         # Skip Apple .AAE sidecar edit metadata files
@@ -812,15 +938,21 @@ function Scan-WpdFolder($folderObj, [string]$prefix, [string]$parentFolderName, 
           # Fallback below
         }
         if ($itemSize -le 0) {
-          try { $itemSize = [int64]$entry.Size } catch { $warnings.Add("Size($displayName): " + $_.Exception.Message) }
+          try { $itemSize = [int64]$entry.Size } catch { [void]$warnings.Add("Size($displayName): " + $_.Exception.Message) }
         }
 
+        # Extract true capture/creation date in priority order, rejecting invalid COM epoch dates (1601 / 1899)
         $dateIso = ''
-        foreach ($prop in @("System.Photo.DateTaken", "System.Media.DateEncoded", "System.DateModified")) {
+        foreach ($prop in @("System.Photo.DateTaken", "System.Media.DateEncoded", "System.ItemDate", "System.DateCreated", "System.DateModified")) {
           if ($dateIso) { break }
           try {
             $dt = $entry.ExtendedProperty($prop)
-            if ($null -ne $dt) { $dateIso = ([datetime]$dt).ToString('o') }
+            if ($null -ne $dt) {
+              $dtVal = [datetime]$dt
+              if ($dtVal.Year -ge 2000 -and $dtVal.Year -le 2100) {
+                $dateIso = $dtVal.ToString('o')
+              }
+            }
           } catch {
             # Optional property
           }
@@ -828,13 +960,18 @@ function Scan-WpdFolder($folderObj, [string]$prefix, [string]$parentFolderName, 
         if (-not $dateIso) {
           try {
             $md = $entry.ModifyDate
-            if ($null -ne $md) { $dateIso = ([datetime]$md).ToString('o') }
+            if ($null -ne $md) {
+              $mdVal = [datetime]$md
+              if ($mdVal.Year -ge 2000 -and $mdVal.Year -le 2100) {
+                $dateIso = $mdVal.ToString('o')
+              }
+            }
           } catch {
-            $warnings.Add("Date($displayName): " + $_.Exception.Message)
+            [void]$warnings.Add("Date($displayName): " + $_.Exception.Message)
           }
         }
 
-        $results.Add([PSCustomObject]@{
+        [void]$results.Add([ordered]@{
           name = $displayName
           wpdName = $wpdName
           shellPath = $entryShellPath
@@ -846,27 +983,27 @@ function Scan-WpdFolder($folderObj, [string]$prefix, [string]$parentFolderName, 
         })
       }
     } catch {
-      $warnings.Add("Entry: " + $_.Exception.Message)
+      [void]$warnings.Add("Entry: " + $_.Exception.Message)
     }
   }
 }
 
 Scan-WpdFolder $rootFolder '' '' 0
 
-$envelope = [PSCustomObject]@{
-  items = [object[]]$results.ToArray()
-  warnings = [string[]]$warnings.ToArray()
+$envelope = [ordered]@{
+  items = $results
+  warnings = $warnings
 }
 
 Write-Output '${JSON_START_MARKER}'
-ConvertTo-Json -InputObject $envelope -Depth 5 -Compress
+Write-Output (ConvertTo-OpenFsJson $envelope)
 Write-Output '${JSON_END_MARKER}'
 `;
 
   const { stdout } = await runPowerShellEncoded(
     ps,
     { deviceKey },
-    { timeout: 60000 }
+    { timeout: 90000 }
   );
 
   const parsed = parseMarkedJson(stdout, { items: [], warnings: [] });
@@ -879,11 +1016,12 @@ Write-Output '${JSON_END_MARKER}'
       ? [parsed.items]
       : [];
 
+  const maxValidTs = Date.now() + 365 * 24 * 3600 * 1000;
   const enriched = rawList.map((item) => {
     const mediaType = classifyMediaType(item.name);
     let dateStr = item.modifiedAt || '';
     const parsedTime = dateStr ? Date.parse(dateStr) : NaN;
-    if (!dateStr || Number.isNaN(parsedTime) || parsedTime < Date.UTC(2000, 0, 1)) {
+    if (!dateStr || Number.isNaN(parsedTime) || parsedTime < Date.UTC(2000, 0, 1) || parsedTime > maxValidTs) {
       dateStr = inferDateFromFolderName(item.sourceFolder) || new Date().toISOString();
     }
     return {
@@ -893,19 +1031,31 @@ Write-Output '${JSON_END_MARKER}'
     };
   });
 
+  // Strict chronological ordering (newest first), keeping Live Photo pairs (.HEIC right next to .MOV) cleanly grouped
   enriched.sort((a, b) => {
     const ta = Date.parse(a.modifiedAt || '') || 0;
     const tb = Date.parse(b.modifiedAt || '') || 0;
     if (tb !== ta) return tb - ta;
-    return String(b.name || '').localeCompare(String(a.name || ''), 'fr', { numeric: true });
+    const baseA = String(a.name || '').replace(/\.[^.]+$/, '');
+    const baseB = String(b.name || '').replace(/\.[^.]+$/, '');
+    const baseCmp = baseB.localeCompare(baseA, 'fr', { numeric: true, sensitivity: 'base' });
+    if (baseCmp !== 0) return baseCmp;
+    // Place photo (.HEIC/.JPG) before companion video (.MOV)
+    if (a.mediaType !== b.mediaType) {
+      if (a.mediaType === 'photo') return -1;
+      if (b.mediaType === 'photo') return 1;
+    }
+    return String(a.name || '').localeCompare(String(b.name || ''), 'fr', { numeric: true });
   });
 
-  logInfo('wpd', `scanIphoneMedia terminé : ${enriched.length} fichiers`);
+  logInfo('wpd', `scanIphoneMedia terminé : ${enriched.length} fichiers classés chronologiquement`);
   return enriched;
 }
 
 /**
  * Generates Windows Shell thumbnails (JPEG) keyed strictly by unique item.key (shellPath).
+ * Uses safe 24bpp JPEG rendering, SIIGBF flag cascade (0x09 -> 0x08 -> 0x01 -> 0x00),
+ * logs exact HRESULT failures, and recovers partial disk output even on MTP slowdowns.
  */
 async function generateThumbnailsBatch(items, maxSize = 360) {
   if (process.platform !== 'win32' || !Array.isArray(items) || items.length === 0) {
@@ -919,7 +1069,7 @@ async function generateThumbnailsBatch(items, maxSize = 360) {
 
   for (const item of items) {
     if (!item || !item.key || !item.shellPath) continue;
-    const outPath = path.join(THUMB_CACHE_ROOT, `${hashKey(`${item.key}|${maxSize}`)}.jpg`);
+    const outPath = path.join(THUMB_CACHE_ROOT, `${hashKey(`${item.key}|${maxSize}|v2`)}.jpg`);
     if (fs.existsSync(outPath) && fs.statSync(outPath).size > 200) {
       result[item.key] = outPath;
     } else {
@@ -942,25 +1092,33 @@ $payload = $payloadJson | ConvertFrom-Json
 $items = @($payload.items | Where-Object { $null -ne $_ })
 $maxSize = [int]$payload.maxSize
 $generated = @{}
+$errors = New-Object System.Collections.ArrayList
+[int[]]$flagsOrder = @(9, 8, 1, 0)
 
 foreach ($item in $items) {
   try {
     $sp = [string]$item.shellPath
     $outFile = [string]$item.outPath
-    $ok = [OpenFsThumbExtractor]::SaveThumbnail($sp, $outFile, $maxSize, 9)
-    if (-not $ok) {
-      $ok = [OpenFsThumbExtractor]::SaveThumbnail($sp, $outFile, $maxSize, 8)
-    }
-    if ($ok -and (Test-Path -LiteralPath $outFile)) {
+    $errMsg = [OpenFsThumbExtractor]::SaveThumbnailWithFallback($sp, $outFile, $maxSize, $flagsOrder, 82L)
+    if ([string]::IsNullOrEmpty($errMsg) -and (Test-Path -LiteralPath $outFile)) {
       $generated[[string]$item.key] = $outFile
+    } elseif ($errors.Count -lt 5) {
+      [void]$errors.Add(([string]$item.key) + " => " + $errMsg)
     }
   } catch {
-    # Individual thumbnail failure should not block the rest of the batch
+    if ($errors.Count -lt 5) {
+      [void]$errors.Add("PS exception: " + $_.Exception.Message)
+    }
   }
 }
 
+$envelope = [ordered]@{
+  generated = $generated
+  errors = $errors
+}
+
 Write-Output '${JSON_START_MARKER}'
-ConvertTo-Json -InputObject $generated -Depth 3 -Compress
+Write-Output (ConvertTo-OpenFsJson $envelope)
 Write-Output '${JSON_END_MARKER}'
 `;
 
@@ -968,18 +1126,38 @@ Write-Output '${JSON_END_MARKER}'
     const { stdout } = await runPowerShellEncoded(
       ps,
       { items: toGenerate, maxSize },
-      { timeout: 30000 }
+      { timeout: 60000 }
     );
-    const parsed = parseMarkedJson(stdout, {});
-    if (parsed && typeof parsed === 'object') {
-      for (const [k, v] of Object.entries(parsed)) {
-        if (typeof v === 'string' && fs.existsSync(v)) {
+    const parsed = parseMarkedJson(stdout, { generated: {}, errors: [] });
+    if (parsed && typeof parsed.generated === 'object') {
+      for (const [k, v] of Object.entries(parsed.generated)) {
+        if (typeof v === 'string' && fs.existsSync(v) && fs.statSync(v).size > 200) {
           result[k] = v;
         }
       }
     }
+    if (Array.isArray(parsed?.errors) && parsed.errors.length > 0) {
+      logWarn(
+        'thumbs',
+        `${parsed.errors.length} miniature(s) non extraite(s) sur ce lot`,
+        parsed.errors[0]
+      );
+    }
   } catch (err) {
-    logWarn('thumbs', 'Lot de vignettes partiellement échoué', err);
+    logWarn('thumbs', 'Lot de vignettes partiellement échoué ou lent sur MTP', err);
+  } finally {
+    // Always salvage any JPEGs already written to disk even if MTP timed out mid-batch!
+    for (const item of toGenerate) {
+      if (!result[item.key] && fs.existsSync(item.outPath)) {
+        try {
+          if (fs.statSync(item.outPath).size > 200) {
+            result[item.key] = item.outPath;
+          }
+        } catch (statErr) {
+          logWarn('thumbs', `Vérification cache miniature ignorée : ${item.outPath}`, statErr);
+        }
+      }
+    }
   }
 
   return result;
@@ -991,7 +1169,7 @@ async function convertLocalHeicToJpg(localPath) {
   const stat = fs.statSync(localPath);
   const outJpg = path.join(
     PREVIEW_CACHE_ROOT,
-    `heic_${hashKey(`${localPath}|${stat.size}|${stat.mtimeMs}`)}.jpg`
+    `heic_${hashKey(`${localPath}|${stat.size}|${stat.mtimeMs}|v2`)}.jpg`
   );
   if (fs.existsSync(outJpg) && fs.statSync(outJpg).size > 500) {
     return outJpg;
@@ -1003,20 +1181,23 @@ $payloadJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase
 $payload = $payloadJson | ConvertFrom-Json
 $src = [string]$payload.src
 $dst = [string]$payload.dst
-$ok = [OpenFsThumbExtractor]::SaveThumbnail($src, $dst, 1920, 1)
-if (-not $ok) {
-  $ok = [OpenFsThumbExtractor]::SaveThumbnail($src, $dst, 1280, 0)
-}
+[int[]]$flagsOrder = @(1, 0, 9, 8)
+$errMsg = [OpenFsThumbExtractor]::SaveThumbnailWithFallback($src, $dst, 1920, $flagsOrder, 88L)
+$ok = [string]::IsNullOrEmpty($errMsg) -and (Test-Path -LiteralPath $dst)
+$res = [ordered]@{ ok = $ok; path = $dst; error = $errMsg }
 Write-Output '${JSON_START_MARKER}'
-ConvertTo-Json -InputObject ([PSCustomObject]@{ ok = $ok; path = $dst }) -Compress
+Write-Output (ConvertTo-OpenFsJson $res)
 Write-Output '${JSON_END_MARKER}'
 `;
 
   try {
-    const { stdout } = await runPowerShellEncoded(ps, { src: localPath, dst: outJpg }, { timeout: 25000 });
-    const parsed = parseMarkedJson(stdout, { ok: false });
+    const { stdout } = await runPowerShellEncoded(ps, { src: localPath, dst: outJpg }, { timeout: 30000 });
+    const parsed = parseMarkedJson(stdout, { ok: false, error: '' });
     if (parsed?.ok && fs.existsSync(outJpg)) {
       return outJpg;
+    }
+    if (parsed?.error) {
+      logWarn('preview', `Conversion HEIC→JPG refusée (${path.basename(localPath)})`, parsed.error);
     }
   } catch (err) {
     logWarn('preview', `Conversion HEIC→JPG échouée pour ${localPath}`, err);
@@ -1179,7 +1360,7 @@ if (-not $stagedFile -or -not (Test-Path -LiteralPath $stagedFile)) {
 }
 
 Write-Output '${JSON_START_MARKER}'
-ConvertTo-Json -InputObject ([PSCustomObject]@{ stagedPath = $stagedFile; realFileName = $realFileName }) -Compress
+Write-Output (ConvertTo-OpenFsJson ([ordered]@{ stagedPath = $stagedFile; realFileName = $realFileName }))
 Write-Output '${JSON_END_MARKER}'
 `;
 

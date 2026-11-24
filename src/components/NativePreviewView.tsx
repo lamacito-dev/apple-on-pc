@@ -37,6 +37,7 @@ interface NativePreviewViewProps {
   onClose: () => void;
   onExportToPc?: (entry: DesktopFsEntry) => Promise<void>;
   onSaved?: () => void;
+  onPreviewImageReady?: (entryKey: string, url: string) => void;
   onToast?: (text: string, type?: 'info' | 'success' | 'error') => void;
 }
 
@@ -83,6 +84,7 @@ export function NativePreviewView({
   onClose,
   onExportToPc,
   onSaved,
+  onPreviewImageReady,
   onToast,
 }: NativePreviewViewProps) {
   const bridge = getDesktopBridge();
@@ -146,6 +148,9 @@ export function NativePreviewView({
         if (!cancelled) {
           setPreview(res);
           setDraftText(res.textContent ?? '');
+          if (res.previewKind === 'image' && res.url && onPreviewImageReady) {
+            onPreviewImageReady(entryKey, res.url);
+          }
         }
       })
       .catch((err) => {

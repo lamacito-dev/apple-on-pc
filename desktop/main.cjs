@@ -365,9 +365,11 @@ app.whenReady().then(() => {
       if (!filePath || !fs.existsSync(filePath)) {
         return new Response('Not found', { status: 404 });
       }
-      return net.fetch(pathToFileURL(filePath).toString(), {
-        headers: request.headers,
-      });
+      const rangeHeader = request.headers.get('range');
+      return net.fetch(
+        pathToFileURL(filePath).toString(),
+        rangeHeader ? { headers: { range: rangeHeader } } : undefined
+      );
     } catch (err) {
       logError('protocol', 'Erreur openfs-local', err);
       return new Response('Bad request', { status: 400 });
