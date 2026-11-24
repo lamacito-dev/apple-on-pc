@@ -89,26 +89,6 @@ export function Sidebar({
           },
         },
         {
-          id: 'documents',
-          label: 'Documents PC',
-          icon: FileText,
-          active: activeSection === 'documents',
-          onClick: () => {
-            onSelectSection('documents');
-            onCloseMobile();
-          },
-        },
-        {
-          id: 'downloads',
-          label: 'Téléchargements',
-          icon: Download,
-          active: activeSection === 'downloads',
-          onClick: () => {
-            onSelectSection('downloads');
-            onCloseMobile();
-          },
-        },
-        {
           id: 'pc_storage',
           label: 'Stockage PC',
           icon: HardDrive,

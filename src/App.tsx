@@ -108,8 +108,6 @@ export default function App() {
   const [nativeDevices, setNativeDevices] = useState<DesktopIphoneDevice[]>([]);
   const [activeNativeDevice, setActiveNativeDevice] = useState<DesktopIphoneDevice | null>(null);
   const [nativeDestDir, setNativeDestDir] = useState<string>('');
-  const [nativeDocsDir, setNativeDocsDir] = useState<string>('');
-  const [nativeDownloadsDir, setNativeDownloadsDir] = useState<string>('');
   const [nativeBusy, setNativeBusy] = useState(false);
   const [nativeError, setNativeError] = useState<string | null>(null);
   const nativeScanInFlightRef = useRef(false);
@@ -402,17 +400,6 @@ export default function App() {
       .getDefaultSyncDir()
       .then((dir) => setNativeDestDir((curr) => curr || dir))
       .catch(() => {});
-
-    if (typeof bridge.getSystemFolder === 'function') {
-      bridge
-        .getSystemFolder('documents')
-        .then((dir) => setNativeDocsDir((curr) => curr || dir))
-        .catch(() => {});
-      bridge
-        .getSystemFolder('downloads')
-        .then((dir) => setNativeDownloadsDir((curr) => curr || dir))
-        .catch(() => {});
-    }
 
     scanNativeIphone(true);
     const interval = window.setInterval(() => {
@@ -1798,20 +1785,6 @@ export default function App() {
                   </div>
                 </div>
               )
-            ) : desktopBridge && activeSection === 'documents' ? (
-              <NativePcBrowserView
-                title="Documents PC"
-                rootPath={nativeDocsDir}
-                searchQuery={searchQuery}
-                onToast={pushToast}
-              />
-            ) : desktopBridge && activeSection === 'downloads' ? (
-              <NativePcBrowserView
-                title="Téléchargements"
-                rootPath={nativeDownloadsDir}
-                searchQuery={searchQuery}
-                onToast={pushToast}
-              />
             ) : desktopBridge && activeSection === 'pc_storage' ? (
               <NativePcBrowserView
                 title="Stockage PC"
