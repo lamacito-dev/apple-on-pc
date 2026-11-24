@@ -40,7 +40,7 @@ const {
   preparePcPreview,
   scanIphoneMedia,
   getQuickIphonePreview,
-  compressIphoneItemToPc,
+  zipIphoneItems,
 } = require('./iphoneBridge.cjs');
 const { createRangeStream } = require('./afcNative.cjs');
 
@@ -331,8 +331,23 @@ ipcMain.handle('openfs:pc-compress-zip', async (_event, sourcePaths, destZipName
   return pcCompressZip(sourcePaths, destZipName);
 });
 
-ipcMain.handle('openfs:compress-iphone-item-to-pc', async (_event, options) => {
-  return compressIphoneItemToPc(options || {});
+// « Enregistrer sous » for a new .zip, like a normal browser download. Returns null if cancelled.
+ipcMain.handle('openfs:choose-zip-destination', async (_event, defaultName, defaultDir) => {
+  const safeName = String(defaultName || 'Archive.zip').replace(/[<>:"/\\|?*]/g, '_');
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Enregistrer l’archive .zip',
+    defaultPath: path.join(defaultDir || getDefaultSyncDir(), safeName.toLowerCase().endsWith('.zip') ? safeName : `${safeName}.zip`),
+    buttonLabel: 'Enregistrer',
+    filters: [{ name: 'Archive ZIP', extensions: ['zip'] }],
+    properties: ['showOverwriteConfirmation'],
+  });
+  return result.canceled || !result.filePath ? null : result.filePath;
+});
+
+ipcMain.handle('openfs:zip-iphone-items', async (event, options) => {
+  return zipIphoneItems(options || {}, (progress) => {
+    if (!event.sender.isDestroyed()) event.sender.send('openfs:zip-progress', progress);
+  });
 });
 
 ipcMain.handle('openfs:pc-extract-zip', async (_event, zipPath) => {

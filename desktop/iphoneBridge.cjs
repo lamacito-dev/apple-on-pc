@@ -1937,39 +1937,118 @@ async function pcCompressZip(sourcePaths, destZipName) {
 }
 
 /**
- * "Compresser .zip" on an iPhone file: fetches it into a temporary folder (WPD, or AFC for app
- * documents / AFC explorer), zips it, and moves only the .zip into the PC destination folder.
+ * Builds one .zip from several files (iPhone camera roll, iPhone AFC storage / app documents, or PC
+ * files) and writes it to destPath, chosen by the user in a « Enregistrer sous » dialog.
+ * The archive is streamed to disk (archiver, ZIP64 when needed), so many large videos never sit in
+ * memory and archives over 4 GB stay valid. Photos/videos are stored without recompression (they are
+ * already compressed). Camera-roll files are streamed straight from the iPhone over AFC when
+ * Apple Devices is available, otherwise copied one at a time through Windows (WPD).
  */
-async function compressIphoneItemToPc(options = {}) {
-  const { deviceId, afcUdid, appId, relativePath, name, shellPath, destDir } = options;
-  if (!relativePath || !name) throw new Error('Fichier iPhone à compresser introuvable.');
-  const stageDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openfs-zip-'));
-  try {
-    const safeName = path.basename(String(name)).replace(/[<>:"/\\|?*]/g, '_');
-    let localFile;
-    if (afcUdid) {
-      localFile = path.join(stageDir, safeName);
-      await afcDownloadFile(afcUdid, relativePath, localFile, { appId: appId || undefined });
-    } else {
-      const copied = await copyFromIphoneToPc(deviceId, relativePath, stageDir, shellPath || '', name);
-      localFile = copied && copied.copiedPath ? copied.copiedPath : path.join(stageDir, safeName);
-    }
-    if (!fs.existsSync(localFile)) throw new Error(`Copie de « ${name} » introuvable avant compression.`);
+async function zipIphoneItems(options = {}, onProgress = () => {}) {
+  const archiver = require('archiver');
+  const { Readable } = require('stream');
+  const { deviceId, afcUdid, appId, items, destPath } = options;
+  if (!Array.isArray(items) || items.length === 0) throw new Error('Aucun fichier à compresser.');
+  if (!destPath) throw new Error('Choisissez où enregistrer l’archive .zip.');
 
-    const zipped = await pcCompressZip([localFile]);
-    const targetDir = path.resolve(destDir || getDefaultSyncDir());
-    await fs.promises.mkdir(targetDir, { recursive: true });
-    const base = zipped.name.replace(/\.zip$/i, '');
-    let finalName = zipped.name;
-    for (let n = 2; fs.existsSync(path.join(targetDir, finalName)); n++) finalName = `${base} (${n}).zip`;
-    const finalPath = path.join(targetDir, finalName);
-    // copy + unlink rather than rename: the temp folder and the PC folder may be on different drives
-    await fs.promises.copyFile(zipped.zipPath, finalPath);
-    logInfo('pc', `Archive ZIP créée depuis l'iPhone : ${finalPath}`);
-    return { ...zipped, zipPath: finalPath, name: finalName, destDir: targetDir };
+  const finalPath = path.resolve(destPath.toLowerCase().endsWith('.zip') ? destPath : `${destPath}.zip`);
+  await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
+  const partPath = `${finalPath}.part`;
+  const stageDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openfs-zip-'));
+  const output = fs.createWriteStream(partPath);
+  const archive = archiver('zip', { zlib: { level: 6 }, forceZip64: false });
+  let streamError = null;
+  archive.on('warning', (err) => logWarn('zip', 'Avertissement pendant la compression', err));
+  archive.on('error', (err) => { streamError = err; });
+  output.on('error', (err) => { streamError = err; });
+  archive.pipe(output);
+  const outputClosed = new Promise((resolve) => output.on('close', resolve));
+
+  const usedNames = new Set();
+  const uniqueEntryName = (name) => {
+    const clean = path.basename(String(name || 'fichier')).replace(/[<>:"/\\|?*]/g, '_');
+    const ext = path.extname(clean);
+    const base = clean.slice(0, clean.length - ext.length);
+    let candidate = clean;
+    for (let n = 2; usedNames.has(candidate.toLowerCase()); n++) candidate = `${base} (${n})${ext}`;
+    usedNames.add(candidate.toLowerCase());
+    return candidate;
+  };
+  const isAlreadyCompressed = (name) =>
+    /\.(heic|heif|jpe?g|png|gif|webp|mov|mp4|m4v|avi|mkv|mp3|m4a|aac|zip|7z|rar|gz|pdf)$/i.test(name);
+
+  try {
+    for (let i = 0; i < items.length; i++) {
+      if (streamError) throw streamError;
+      const item = items[i];
+      const entryName = uniqueEntryName(item.name);
+      let source = null;
+      let stagedFile = null;
+
+      if (item.localPath) {
+        source = fs.createReadStream(path.resolve(item.localPath));
+      } else if (afcUdid) {
+        stagedFile = path.join(stageDir, `${i}_${entryName}`);
+        await afcDownloadFile(afcUdid, item.relativePath, stagedFile, { appId: appId || undefined });
+      } else {
+        const fast = await resolveFastMedia(item.name, item.size);
+        if (fast) {
+          source = Readable.fromWeb(afcNative.createRangeStream(fast.udid, fast.path, 0, Math.max(0, fast.size - 1)));
+        } else {
+          const itemStage = path.join(stageDir, String(i));
+          await fs.promises.mkdir(itemStage, { recursive: true });
+          const copied = await copyFromIphoneToPc(deviceId, item.relativePath, itemStage, item.shellPath || '', item.name);
+          stagedFile = copied && copied.copiedPath ? copied.copiedPath : null;
+        }
+      }
+      if (!source) {
+        if (!stagedFile || !fs.existsSync(stagedFile)) throw new Error(`Impossible de récupérer « ${item.name} ».`);
+        source = fs.createReadStream(stagedFile);
+      }
+
+      const entryDone = new Promise((resolve, reject) => {
+        const onEntry = () => { cleanup(); resolve(); };
+        const onErr = (err) => { cleanup(); reject(err); };
+        const cleanup = () => { archive.off('entry', onEntry); archive.off('error', onErr); source.off?.('error', onErr); };
+        archive.on('entry', onEntry);
+        archive.on('error', onErr);
+        source.on?.('error', onErr);
+      });
+      archive.append(source, { name: entryName, store: isAlreadyCompressed(entryName) });
+      await entryDone;
+      if (stagedFile) await fs.promises.rm(stagedFile, { force: true }).catch(() => {});
+      onProgress({ done: i + 1, total: items.length, name: entryName });
+    }
+
+    await archive.finalize();
+    await outputClosed;
+    if (streamError) throw streamError;
+    for (let n = 0; n < 5; n++) {
+      try { await fs.promises.rename(partPath, finalPath); break; } catch (err) {
+        if (n === 4) throw err;
+        if (err.code === 'EEXIST' || err.code === 'EPERM') await fs.promises.rm(finalPath, { force: true }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+    const stat = await fs.promises.stat(finalPath);
+    const sha256 = await computeFileSha256(finalPath);
+    logInfo('zip', `Archive créée : ${finalPath} (${items.length} fichier(s), ${stat.size} octets)`);
+    return {
+      zipPath: finalPath,
+      name: path.basename(finalPath),
+      destDir: path.dirname(finalPath),
+      size: stat.size,
+      sha256,
+      fileCount: items.length,
+    };
+  } catch (err) {
+    archive.abort();
+    output.destroy();
+    await fs.promises.rm(partPath, { force: true }).catch(() => {});
+    throw err;
   } finally {
     await fs.promises.rm(stageDir, { recursive: true, force: true }).catch((err) =>
-      logWarn('pc', 'Nettoyage du dossier temporaire de compression échoué', err)
+      logWarn('zip', 'Nettoyage du dossier temporaire de compression échoué', err)
     );
   }
 }
@@ -2039,6 +2118,6 @@ module.exports = {
   pcRenameItem,
   pcSaveTextFile,
   pcCompressZip,
-  compressIphoneItemToPc,
+  zipIphoneItems,
   pcExtractZip,
 };

@@ -184,17 +184,18 @@ export interface OpenFSDesktopAPI {
     sourcePaths: string[],
     destZipName?: string
   ) => Promise<{ zipPath: string; name: string; size: number; sha256: string; fileCount: number }>;
-  /** Copies an iPhone file to a temp folder, zips it and saves only the .zip in destDir. */
-  compressIphoneItemToPc?: (options: {
+  /** Opens a « Enregistrer sous » dialog for a .zip; resolves to the chosen path, or null if cancelled. */
+  chooseZipDestination?: (defaultName: string, defaultDir?: string) => Promise<string | null>;
+  /** Streams several iPhone (or PC) files into one .zip saved at destPath. */
+  zipIphoneItems?: (options: {
     deviceId?: string;
     afcUdid?: string;
     appId?: string;
-    relativePath: string;
-    name: string;
-    shellPath?: string;
-    size?: number;
-    destDir?: string;
-  }) => Promise<{ zipPath: string; name: string; size: number; sha256: string; fileCount: number; destDir: string }>;
+    destPath: string;
+    items: Array<{ relativePath?: string; name: string; shellPath?: string; size?: number; localPath?: string }>;
+  }) => Promise<{ zipPath: string; name: string; destDir: string; size: number; sha256: string; fileCount: number }>;
+  /** Progress of the running zipIphoneItems call; returns an unsubscribe function. */
+  onZipProgress?: (callback: (progress: { done: number; total: number; name: string }) => void) => () => void;
   pcExtractZip: (
     zipPath: string
   ) => Promise<{ extractDir: string; name: string; fileCount: number }>;

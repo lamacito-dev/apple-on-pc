@@ -226,30 +226,33 @@ export function NativePreviewView({
   };
 
   const canCompress =
-    Boolean(bridge) &&
-    (source === 'pc' || (Boolean(bridge?.compressIphoneItemToPc) && Boolean(onExportToPc)));
+    Boolean(bridge?.zipIphoneItems && bridge?.chooseZipDestination) &&
+    (source === 'pc' || Boolean(onExportToPc));
 
   const handleCompressZip = async () => {
-    if (!bridge || compressing) return;
+    if (!bridge?.zipIphoneItems || !bridge.chooseZipDestination || compressing) return;
+    // Ask where to save the archive, like a normal download (« Enregistrer sous »)
+    const defaultName = `${entry.name.replace(/\.[^.]+$/, '') || 'Archive'}.zip`;
+    const defaultDir = source === 'pc' ? entry.path.replace(/[\\/][^\\/]*$/, '') : zipDestDir;
+    const destPath = await bridge.chooseZipDestination(defaultName, defaultDir);
+    if (!destPath) return;
     setCompressing(true);
     try {
-      if (source === 'pc') {
-        const res = await bridge.pcCompressZip([entry.path]);
-        onSaved?.();
-        onToast?.(`« ${res.name} » créé à côté du fichier (${formatBytes(res.size)}).`, 'success');
-      } else if (bridge.compressIphoneItemToPc) {
-        const res = await bridge.compressIphoneItemToPc({
-          deviceId,
-          afcUdid,
-          appId: afcAppId,
-          relativePath: entry.path,
-          name: entry.name,
-          shellPath: entry.shellPath,
-          size: entry.size,
-          destDir: zipDestDir,
-        });
-        onToast?.(`« ${res.name} » créé dans ${res.destDir} (${formatBytes(res.size)}).`, 'success');
-      }
+      const res = await bridge.zipIphoneItems(
+        source === 'pc'
+          ? { destPath, items: [{ name: entry.name, localPath: entry.path }] }
+          : {
+              deviceId,
+              afcUdid,
+              appId: afcAppId,
+              destPath,
+              items: [
+                { relativePath: entry.path, name: entry.name, shellPath: entry.shellPath, size: entry.size },
+              ],
+            }
+      );
+      if (source === 'pc') onSaved?.();
+      onToast?.(`« ${res.name} » enregistré dans ${res.destDir} (${formatBytes(res.size)}).`, 'success');
     } catch (err) {
       onToast?.(
         err instanceof Error ? err.message : 'Impossible de créer l’archive .zip.',

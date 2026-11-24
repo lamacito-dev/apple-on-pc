@@ -6,6 +6,7 @@ import {
   Calendar,
   Check,
   Download,
+  FileArchive,
   File as FileIcon,
   Film,
   Folder,
@@ -437,6 +438,47 @@ export function NativeMediaWorkspace({
     await runBatchExport(nextQueue);
   };
 
+  const [zipping, setZipping] = useState(false);
+  const [zipProgress, setZipProgress] = useState<{ done: number; total: number } | null>(null);
+
+  // Several selected photos/videos -> one .zip, saved where the user chooses (« Enregistrer sous »)
+  const handleZipSelection = async () => {
+    if (!bridge?.zipIphoneItems || !bridge.chooseZipDestination || zipping) return;
+    const keySet = new Set(selectedKeys);
+    const targets = filteredItems.filter((i) => keySet.has(getEntryKey(i)));
+    if (targets.length === 0) {
+      onToast('Cochez les photos ou vidéos à mettre dans le .zip, ou cliquez sur « Sélectionner tout ».', 'info');
+      return;
+    }
+    const today = new Date().toLocaleDateString('fr-FR').replace(/\//g, '-');
+    const defaultName =
+      targets.length === 1
+        ? `${targets[0].name.replace(/\.[^.]+$/, '')}.zip`
+        : `Photos iPhone ${today} (${targets.length} fichiers).zip`;
+    const destPath = await bridge.chooseZipDestination(defaultName, pcDir);
+    if (!destPath) return;
+    setZipping(true);
+    setZipProgress({ done: 0, total: targets.length });
+    const unsubscribe = bridge.onZipProgress?.((p) => setZipProgress({ done: p.done, total: p.total }));
+    try {
+      const res = await bridge.zipIphoneItems({
+        deviceId: device.id,
+        destPath,
+        items: targets.map((t) => ({ relativePath: t.path, name: t.name, shellPath: t.shellPath, size: t.size })),
+      });
+      onToast(
+        `« ${res.name} » enregistré dans ${res.destDir} — ${res.fileCount} fichier${res.fileCount > 1 ? 's' : ''}, ${formatBytes(res.size)}.`,
+        'success'
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : 'Impossible de créer l’archive .zip.', 'error');
+    } finally {
+      unsubscribe?.();
+      setZipping(false);
+      setZipProgress(null);
+    }
+  };
+
   const handlePrimaryCopy = () => {
     const keySet = new Set(selectedKeys);
     const targets = filteredItems.filter((i) => keySet.has(getEntryKey(i)));
@@ -616,10 +658,30 @@ export function NativeMediaWorkspace({
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
           </button>
 
+          {layout !== 'folders' && bridge?.zipIphoneItems && (
+            <button
+              type="button"
+              disabled={zipping || batchRunning || selectedKeys.length === 0}
+              onClick={handleZipSelection}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-45 text-slate-700 dark:text-slate-200 text-xs font-medium transition-colors whitespace-nowrap"
+            >
+              {zipping ? (
+                <RefreshCw size={13} className="animate-spin" />
+              ) : (
+                <FileArchive size={13} />
+              )}
+              {zipping && zipProgress
+                ? `Compression ${zipProgress.done}/${zipProgress.total}...`
+                : selectedKeys.length > 0
+                  ? `Compresser en .zip (${selectedKeys.length})`
+                  : 'Compresser en .zip'}
+            </button>
+          )}
+
           {layout !== 'folders' && (
             <button
               type="button"
-              disabled={batchRunning || selectedKeys.length === 0}
+              disabled={zipping || batchRunning || selectedKeys.length === 0}
               onClick={handlePrimaryCopy}
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#1A65C7] hover:bg-[#1557B0] disabled:opacity-45 text-white text-xs font-medium transition-colors whitespace-nowrap"
             >

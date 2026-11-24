@@ -57,7 +57,14 @@ contextBridge.exposeInMainWorld('openfsDesktop', {
     ipcRenderer.invoke('openfs:pc-save-text-file', filePath, textContent, options),
   pcCompressZip: (sourcePaths, destZipName) =>
     ipcRenderer.invoke('openfs:pc-compress-zip', sourcePaths, destZipName),
-  compressIphoneItemToPc: (options) => ipcRenderer.invoke('openfs:compress-iphone-item-to-pc', options),
+  chooseZipDestination: (defaultName, defaultDir) =>
+    ipcRenderer.invoke('openfs:choose-zip-destination', defaultName, defaultDir),
+  zipIphoneItems: (options) => ipcRenderer.invoke('openfs:zip-iphone-items', options),
+  onZipProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('openfs:zip-progress', listener);
+    return () => ipcRenderer.removeListener('openfs:zip-progress', listener);
+  },
   pcExtractZip: (zipPath) => ipcRenderer.invoke('openfs:pc-extract-zip', zipPath),
   computeSha256: (filePath) => ipcRenderer.invoke('openfs:compute-sha256', filePath),
 
