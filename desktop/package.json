@@ -76,7 +76,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "OpenFS",
-      "artifactName": "OpenFS-Setup-${version}.exe"
+      "artifactName": "OpenFS-Setup-${version}.exe",
+      "include": "installer/installer.nsh"
     },
     "portable": {
       "artifactName": "OpenFS-Portable-${version}.exe"

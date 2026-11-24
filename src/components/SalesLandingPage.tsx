@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   Download,
+  ExternalLink,
   Laptop,
   Minus,
   Moon,
@@ -106,6 +107,10 @@ interface SalesLandingPageProps {
   darkMode: boolean;
   onToggleDarkMode: () => void;
 }
+
+// Apple's free « Appareils Apple » app (Microsoft Store): provides the iPhone USB service OpenFS
+// uses for full access and instant previews. It cannot be bundled with OpenFS (Store-only).
+const APPLE_DEVICES_STORE_URL = 'https://apps.microsoft.com/detail/9NP83LWLPZ9K';
 
 const COMPARISON_ROWS = [
   {
@@ -940,8 +945,33 @@ export function SalesLandingPage({
                   </p>
                 </li>
                 <li className="flex items-start gap-3">
-                  <span className="w-6 h-6 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100 text-xs font-mono font-semibold flex items-center justify-center shrink-0 mt-0.5">
+                  <span className="w-6 h-6 rounded-md bg-[#1A65C7]/10 text-[#1A65C7] dark:bg-blue-500/15 dark:text-blue-300 text-xs font-mono font-semibold flex items-center justify-center shrink-0 mt-0.5">
                     3
+                  </span>
+                  <div className="space-y-2.5">
+                    <p className="leading-relaxed">
+                      Installez aussi{' '}
+                      <strong className="font-semibold text-slate-900 dark:text-slate-100">
+                        Appareils Apple
+                      </strong>{' '}
+                      (gratuit, Microsoft Store). Il active l’accès complet à l’iPhone — documents
+                      d’apps, envoi PC → iPhone — et les aperçus instantanés. Sans lui, OpenFS
+                      fonctionne en mode photos et vidéos uniquement.
+                    </p>
+                    <a
+                      href={APPLE_DEVICES_STORE_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-800 dark:text-slate-100 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                    >
+                      <ExternalLink size={13} />
+                      Ouvrir Appareils Apple dans le Microsoft Store
+                    </a>
+                  </div>
+                </li>
+                <li className="flex items-start gap-3">
+                  <span className="w-6 h-6 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-slate-100 text-xs font-mono font-semibold flex items-center justify-center shrink-0 mt-0.5">
+                    4
                   </span>
                   <p className="leading-relaxed">
                     Branchez votre iPhone en USB-C, appuyez sur « Faire confiance » sur l’iPhone,
