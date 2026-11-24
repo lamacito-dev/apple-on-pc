@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  FileArchive,
   File as FileIcon,
   Film,
   FolderOpen,
@@ -36,6 +37,8 @@ interface NativePreviewViewProps {
   onSelectSibling?: (next: DesktopFsEntry) => void;
   onClose: () => void;
   onExportToPc?: (entry: DesktopFsEntry) => Promise<void>;
+  /** PC folder where « Compresser .zip » saves the archive of an iPhone file. */
+  zipDestDir?: string;
   onSaved?: () => void;
   onPreviewImageReady?: (entryKey: string, url: string) => void;
   onToast?: (text: string, type?: 'info' | 'success' | 'error') => void;
@@ -83,6 +86,7 @@ export function NativePreviewView({
   onSelectSibling,
   onClose,
   onExportToPc,
+  zipDestDir,
   onSaved,
   onPreviewImageReady,
   onToast,
@@ -96,6 +100,7 @@ export function NativePreviewView({
   const [zoom, setZoom] = useState(100);
   const [naturalDims, setNaturalDims] = useState<{ w: number; h: number } | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [compressing, setCompressing] = useState(false);
 
   // In-place editing state
   const [editing, setEditing] = useState(false);
@@ -217,6 +222,41 @@ export function NativePreviewView({
       await onExportToPc(entry);
     } finally {
       setExporting(false);
+    }
+  };
+
+  const canCompress =
+    Boolean(bridge) &&
+    (source === 'pc' || (Boolean(bridge?.compressIphoneItemToPc) && Boolean(onExportToPc)));
+
+  const handleCompressZip = async () => {
+    if (!bridge || compressing) return;
+    setCompressing(true);
+    try {
+      if (source === 'pc') {
+        const res = await bridge.pcCompressZip([entry.path]);
+        onSaved?.();
+        onToast?.(`« ${res.name} » créé à côté du fichier (${formatBytes(res.size)}).`, 'success');
+      } else if (bridge.compressIphoneItemToPc) {
+        const res = await bridge.compressIphoneItemToPc({
+          deviceId,
+          afcUdid,
+          appId: afcAppId,
+          relativePath: entry.path,
+          name: entry.name,
+          shellPath: entry.shellPath,
+          size: entry.size,
+          destDir: zipDestDir,
+        });
+        onToast?.(`« ${res.name} » créé dans ${res.destDir} (${formatBytes(res.size)}).`, 'success');
+      }
+    } catch (err) {
+      onToast?.(
+        err instanceof Error ? err.message : 'Impossible de créer l’archive .zip.',
+        'error'
+      );
+    } finally {
+      setCompressing(false);
     }
   };
 
@@ -642,6 +682,22 @@ export function NativePreviewView({
                 <Download size={15} />
               )}
               {exporting ? 'Export + SHA-256...' : 'Exporter vers PC'}
+            </button>
+          )}
+
+          {canCompress && (
+            <button
+              type="button"
+              disabled={compressing}
+              onClick={handleCompressZip}
+              className="w-full py-2.5 px-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60 text-slate-800 dark:text-slate-100 text-sm font-medium transition-colors inline-flex items-center justify-center gap-2"
+            >
+              {compressing ? (
+                <RefreshCw size={14} className="animate-spin" />
+              ) : (
+                <FileArchive size={15} />
+              )}
+              {compressing ? 'Compression .zip...' : 'Compresser .zip'}
             </button>
           )}
 

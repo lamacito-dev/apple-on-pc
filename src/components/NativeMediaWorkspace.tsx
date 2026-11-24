@@ -473,6 +473,7 @@ export function NativeMediaWorkspace({
         onExportToPc={async (entry) => {
           await handleCopyItemsToPc([entry]);
         }}
+        zipDestDir={pcDir}
         onPreviewImageReady={(key, url) => {
           setThumbs((prev) => (prev[key] ? prev : { ...prev, [key]: url }));
         }}

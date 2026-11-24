@@ -356,6 +356,7 @@ export function NativeAfcExplorerView({
         onSelectSibling={(next) => setPreviewEntry(next)}
         onClose={() => setPreviewEntry(null)}
         onExportToPc={handleDownloadToPc}
+        zipDestDir={pcCurrentDir || undefined}
         onSaved={() => loadAfcDir(remotePath, selectedApp?.bundleId)}
         onToast={onToast}
       />

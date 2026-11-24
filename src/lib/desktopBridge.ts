@@ -184,6 +184,17 @@ export interface OpenFSDesktopAPI {
     sourcePaths: string[],
     destZipName?: string
   ) => Promise<{ zipPath: string; name: string; size: number; sha256: string; fileCount: number }>;
+  /** Copies an iPhone file to a temp folder, zips it and saves only the .zip in destDir. */
+  compressIphoneItemToPc?: (options: {
+    deviceId?: string;
+    afcUdid?: string;
+    appId?: string;
+    relativePath: string;
+    name: string;
+    shellPath?: string;
+    size?: number;
+    destDir?: string;
+  }) => Promise<{ zipPath: string; name: string; size: number; sha256: string; fileCount: number; destDir: string }>;
   pcExtractZip: (
     zipPath: string
   ) => Promise<{ extractDir: string; name: string; fileCount: number }>;

@@ -40,6 +40,7 @@ const {
   preparePcPreview,
   scanIphoneMedia,
   getQuickIphonePreview,
+  compressIphoneItemToPc,
 } = require('./iphoneBridge.cjs');
 const { createRangeStream } = require('./afcNative.cjs');
 
@@ -328,6 +329,10 @@ ipcMain.handle('openfs:pc-save-text-file', async (_event, filePath, textContent,
 
 ipcMain.handle('openfs:pc-compress-zip', async (_event, sourcePaths, destZipName) => {
   return pcCompressZip(sourcePaths, destZipName);
+});
+
+ipcMain.handle('openfs:compress-iphone-item-to-pc', async (_event, options) => {
+  return compressIphoneItemToPc(options || {});
 });
 
 ipcMain.handle('openfs:pc-extract-zip', async (_event, zipPath) => {

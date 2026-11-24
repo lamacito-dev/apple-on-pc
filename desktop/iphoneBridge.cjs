@@ -1936,6 +1936,44 @@ async function pcCompressZip(sourcePaths, destZipName) {
   };
 }
 
+/**
+ * "Compresser .zip" on an iPhone file: fetches it into a temporary folder (WPD, or AFC for app
+ * documents / AFC explorer), zips it, and moves only the .zip into the PC destination folder.
+ */
+async function compressIphoneItemToPc(options = {}) {
+  const { deviceId, afcUdid, appId, relativePath, name, shellPath, destDir } = options;
+  if (!relativePath || !name) throw new Error('Fichier iPhone à compresser introuvable.');
+  const stageDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'openfs-zip-'));
+  try {
+    const safeName = path.basename(String(name)).replace(/[<>:"/\\|?*]/g, '_');
+    let localFile;
+    if (afcUdid) {
+      localFile = path.join(stageDir, safeName);
+      await afcDownloadFile(afcUdid, relativePath, localFile, { appId: appId || undefined });
+    } else {
+      const copied = await copyFromIphoneToPc(deviceId, relativePath, stageDir, shellPath || '', name);
+      localFile = copied && copied.copiedPath ? copied.copiedPath : path.join(stageDir, safeName);
+    }
+    if (!fs.existsSync(localFile)) throw new Error(`Copie de « ${name} » introuvable avant compression.`);
+
+    const zipped = await pcCompressZip([localFile]);
+    const targetDir = path.resolve(destDir || getDefaultSyncDir());
+    await fs.promises.mkdir(targetDir, { recursive: true });
+    const base = zipped.name.replace(/\.zip$/i, '');
+    let finalName = zipped.name;
+    for (let n = 2; fs.existsSync(path.join(targetDir, finalName)); n++) finalName = `${base} (${n}).zip`;
+    const finalPath = path.join(targetDir, finalName);
+    // copy + unlink rather than rename: the temp folder and the PC folder may be on different drives
+    await fs.promises.copyFile(zipped.zipPath, finalPath);
+    logInfo('pc', `Archive ZIP créée depuis l'iPhone : ${finalPath}`);
+    return { ...zipped, zipPath: finalPath, name: finalName, destDir: targetDir };
+  } finally {
+    await fs.promises.rm(stageDir, { recursive: true, force: true }).catch((err) =>
+      logWarn('pc', 'Nettoyage du dossier temporaire de compression échoué', err)
+    );
+  }
+}
+
 async function pcExtractZip(zipPath) {
   const safeZip = path.resolve(zipPath);
   if (!fs.existsSync(safeZip)) {
@@ -2001,5 +2039,6 @@ module.exports = {
   pcRenameItem,
   pcSaveTextFile,
   pcCompressZip,
+  compressIphoneItemToPc,
   pcExtractZip,
 };
