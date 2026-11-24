@@ -12,6 +12,15 @@ export default defineConfig(() => {
     base: isDesktopBuild ? './' : '/',
     plugins: [
       react(),
+      // The search-engine title in index.html is for the website. Electron shows the page title in
+      // the desktop window, so the desktop build keeps the app's original window title.
+      {
+        name: 'openfs-desktop-title',
+        transformIndexHtml(html: string) {
+          if (!isDesktopBuild) return html;
+          return html.replace(/<title>[^<]*<\/title>/, '<title>OpenFS — Accès USB-C iPhone sur Windows &amp; Linux</title>');
+        },
+      },
       tailwindcss(),
       VitePWA({
         disable: isDesktopBuild,
