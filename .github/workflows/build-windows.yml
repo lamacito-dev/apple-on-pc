@@ -43,10 +43,21 @@ jobs:
           DEST="desktop/resources/libimobiledevice"
           mkdir -p "$DEST/LICENSES"
 
-          TOOLS="idevice_id ideviceinfo idevicepair afcclient ideviceinstaller plistutil"
-          for tool in $TOOLS; do
+          # afcclient.exe is not shipped by MSYS2's libimobiledevice 1.3.0 package: it is optional.
+          # When it is missing, the app disables advanced AFC features and falls back to Windows WPD.
+          REQUIRED_TOOLS="idevice_id ideviceinfo idevicepair ideviceinstaller plistutil"
+          OPTIONAL_TOOLS="afcclient"
+          for tool in $OPTIONAL_TOOLS; do
+            if [ ! -f "/ucrt64/bin/${tool}.exe" ]; then
+              echo "::warning::Optional binary ${tool}.exe not available in MSYS2; AFC features fall back to WPD."
+            fi
+          done
+          for tool in $REQUIRED_TOOLS $OPTIONAL_TOOLS; do
             BIN="/ucrt64/bin/${tool}.exe"
             if [ ! -f "$BIN" ]; then
+              case " $OPTIONAL_TOOLS " in
+                *" $tool "*) continue ;;
+              esac
               echo "ERROR: Missing expected binary $BIN"
               exit 1
             fi
@@ -138,6 +149,8 @@ jobs:
 
   publish-release:
     needs: [build-windows, build-linux]
+    # Publish the Windows installers even if the Linux build fails, so the site's download link stays up to date.
+    if: ${{ always() && needs.build-windows.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download Windows installers
@@ -147,6 +160,7 @@ jobs:
           path: release-assets
 
       - name: Download Linux installers
+        if: ${{ needs.build-linux.result == 'success' }}
         uses: actions/download-artifact@v4
         with:
           name: OpenFS-Linux-Installers

@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "description": "OpenFS — Application Windows & Linux native pour accéder aux fichiers iPhone en USB-C (WPD / AFC)",
   "main": "main.cjs",
+  "homepage": "https://openfs-nine.vercel.app",
+  "author": {
+    "name": "OpenFS",
+    "email": "lamacito-dev@users.noreply.github.com"
+  },
   "private": true,
   "scripts": {
     "prepare:web": "node scripts/prepare-web.cjs",
@@ -69,6 +74,7 @@
     "linux": {
       "icon": "../public/pwa-512x512.png",
       "category": "Utility",
+      "maintainer": "OpenFS <lamacito-dev@users.noreply.github.com>",
       "artifactName": "OpenFS-${version}.${ext}",
       "target": [
         {
