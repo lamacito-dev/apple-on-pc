@@ -4,6 +4,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { logError, logInfo, logWarn } = require('./logger.cjs');
+const native = require('./afcNative.cjs');
+
+// The afcclient CLI is not available on Windows (not shipped by MSYS2's libimobiledevice 1.3.0).
+// Without it, every AFC operation goes through the built-in native client (afcNative.cjs).
+function hasAfcCli() {
+  return resolveBinary('afcclient').found;
+}
 
 const APPLE_DEVICES_STORE_URL = 'ms-windows-store://pdp/?ProductId=9NP83LWLPZ9K';
 const AFC_WORK_ROOT = path.join(os.tmpdir(), 'openfs-afc-work');
@@ -474,14 +481,42 @@ async function getAfcCapabilities() {
 
   const amds = await checkWindowsAmds();
   const linux = await getLinuxStatus();
+  const nativeUdids = await native.getNativeUdids();
+  const nativeAvailable = nativeUdids !== null;
 
-  const hasCoreAfc =
+  // With the "Apple Devices" app, AppleMobileDeviceProcess.exe serves usbmuxd on 127.0.0.1:27015
+  // but is not a classic Windows service: trust the live connection over the service lookup.
+  if (process.platform === 'win32' && nativeAvailable) {
+    amds.installed = true;
+    amds.running = true;
+    amds.status = 'Running';
+    amds.serviceName = amds.serviceName || 'Apple Devices (usbmuxd 127.0.0.1:27015)';
+  }
+
+  const cliCoreAfc =
     binaries.idevice_id.found &&
     binaries.idevicepair.found &&
     binaries.afcclient.found;
+  const hasCoreAfc = cliCoreAfc || nativeAvailable;
+
+  if (nativeAvailable && !cliCoreAfc) {
+    const ready = true;
+    return {
+      platform: process.platform,
+      binaries,
+      engine: 'native',
+      hasCoreAfc,
+      hasAppsSupport: true,
+      hasPlistSupport: true,
+      ready,
+      amds,
+      linux,
+      storeUrl: APPLE_DEVICES_STORE_URL,
+    };
+  }
 
   const ready =
-    hasCoreAfc &&
+    cliCoreAfc &&
     (process.platform === 'win32'
       ? amds.installed && amds.running
       : process.platform === 'linux'
@@ -491,6 +526,7 @@ async function getAfcCapabilities() {
   return {
     platform: process.platform,
     binaries,
+    engine: cliCoreAfc ? 'cli' : 'none',
     hasCoreAfc,
     hasAppsSupport: binaries.ideviceinstaller.found && binaries.afcclient.found,
     hasPlistSupport: binaries.plistutil.found,
@@ -503,8 +539,8 @@ async function getAfcCapabilities() {
 
 async function listAfcDevices() {
   const idBin = resolveBinary('idevice_id');
-  if (!idBin.found) {
-    return [];
+  if (!idBin.found || !hasAfcCli()) {
+    return native.listNativeDevices();
   }
 
   try {
@@ -596,6 +632,9 @@ async function listAfcDevices() {
 }
 
 async function pairIphone(udid) {
+  if (!resolveBinary('idevicepair').found || !hasAfcCli()) {
+    return native.nativePair(udid ? String(udid).trim() : '');
+  }
   const args = udid && String(udid).trim() ? ['-u', String(udid).trim(), 'pair'] : ['pair'];
   try {
     const { stdout } = await execTool('idevicepair', args, { timeout: 15000 });
@@ -704,6 +743,9 @@ async function afcListDirectory(udid, remotePath = '/', options = {}) {
   const safeRemote = normalizeRemotePath(remotePath);
   const appId = options.appId || null;
   const showHidden = options.showHidden !== false;
+  if (!hasAfcCli()) {
+    return native.nativeListDirectory(udid, safeRemote, { appId, showHidden });
+  }
   const baseArgs = buildAfcBaseArgs(udid, appId);
 
   const { stdout } = await execTool('afcclient', [...baseArgs, 'ls', '-l', safeRemote], {
@@ -793,6 +835,9 @@ function parseAppsFromXml(xmlText) {
 
 async function listSharedApps(udid) {
   if (!udid) throw new Error('UDID iPhone requis pour lister les applications.');
+  if (!resolveBinary('ideviceinstaller').found || !hasAfcCli()) {
+    return native.nativeListSharedApps(udid);
+  }
 
   let xmlOut = '';
   let plainOut = '';
@@ -866,10 +911,14 @@ async function afcDownloadFile(udid, remotePath, destLocalPath, options = {}) {
   const resolvedDest = path.resolve(destLocalPath);
   fs.mkdirSync(path.dirname(resolvedDest), { recursive: true });
 
-  const baseArgs = buildAfcBaseArgs(udid, options.appId);
-  await execTool('afcclient', [...baseArgs, 'get', safeRemote, resolvedDest], {
-    timeout: 180000,
-  });
+  if (hasAfcCli()) {
+    const baseArgs = buildAfcBaseArgs(udid, options.appId);
+    await execTool('afcclient', [...baseArgs, 'get', safeRemote, resolvedDest], {
+      timeout: 180000,
+    });
+  } else {
+    await native.nativeDownload(udid, safeRemote, resolvedDest, { appId: options.appId });
+  }
 
   if (!fs.existsSync(resolvedDest)) {
     throw new Error(`Le téléchargement AFC n’a pas créé le fichier attendu : ${resolvedDest}`);
@@ -905,10 +954,15 @@ async function afcUploadFile(udid, localFilePath, remoteTargetDirOrFile, options
 
   const sourceSha256 = await computeFileSha256(safeLocal);
   const baseArgs = buildAfcBaseArgs(udid, options.appId);
+  const useCli = hasAfcCli();
 
-  await execTool('afcclient', [...baseArgs, 'put', safeLocal, targetRemote], {
-    timeout: 180000,
-  });
+  if (useCli) {
+    await execTool('afcclient', [...baseArgs, 'put', safeLocal, targetRemote], {
+      timeout: 180000,
+    });
+  } else {
+    await native.nativeUpload(udid, safeLocal, targetRemote, { appId: options.appId });
+  }
 
   // Verify integrity by reading back the uploaded file and comparing SHA-256
   ensureAfcWorkDir();
@@ -919,9 +973,13 @@ async function afcUploadFile(udid, localFilePath, remoteTargetDirOrFile, options
   let destSha256 = '';
   let verified = false;
   try {
-    await execTool('afcclient', [...baseArgs, 'get', targetRemote, verifyPath], {
-      timeout: 180000,
-    });
+    if (useCli) {
+      await execTool('afcclient', [...baseArgs, 'get', targetRemote, verifyPath], {
+        timeout: 180000,
+      });
+    } else {
+      await native.nativeDownload(udid, targetRemote, verifyPath, { appId: options.appId });
+    }
     destSha256 = await computeFileSha256(verifyPath);
     verified = destSha256 === sourceSha256;
   } catch (verifyErr) {
@@ -950,6 +1008,10 @@ async function afcMkdir(udid, parentRemotePath, folderName, options = {}) {
   }
   const parent = normalizeRemotePath(parentRemotePath);
   const newPath = parent === '/' ? `/${cleanName}` : `${parent}/${cleanName}`;
+  if (!hasAfcCli()) {
+    await native.nativeMkdir(udid, newPath, { appId: options.appId });
+    return { remotePath: newPath };
+  }
   const baseArgs = buildAfcBaseArgs(udid, options.appId);
 
   await execTool('afcclient', [...baseArgs, 'mkdir', newPath], { timeout: 15000 });
@@ -967,6 +1029,10 @@ async function afcRename(udid, oldRemotePath, newName, options = {}) {
   }
   const parentDir = path.posix.dirname(oldPath);
   const newPath = parentDir === '/' ? `/${cleanName}` : `${parentDir}/${cleanName}`;
+  if (!hasAfcCli()) {
+    await native.nativeRename(udid, oldPath, newPath, { appId: options.appId });
+    return { oldPath, newPath };
+  }
   const baseArgs = buildAfcBaseArgs(udid, options.appId);
 
   await execTool('afcclient', [...baseArgs, 'rename', oldPath, newPath], { timeout: 15000 });
@@ -977,6 +1043,10 @@ async function afcDelete(udid, remotePath, options = {}) {
   const safeRemote = normalizeRemotePath(remotePath);
   if (safeRemote === '/' || safeRemote.length <= 1) {
     throw new Error('Suppression de la racine interdite par sécurité.');
+  }
+  if (!hasAfcCli()) {
+    await native.nativeDelete(udid, safeRemote, { appId: options.appId });
+    return { deletedPath: safeRemote };
   }
   const baseArgs = buildAfcBaseArgs(udid, options.appId);
   const rmArgs = options.recursive ? ['rm', '-rf', safeRemote] : ['rm', safeRemote];
@@ -998,6 +1068,9 @@ function isBinaryPlistFile(filePath) {
 }
 
 async function convertBinaryPlistToXml(inputPath) {
+  if (!resolveBinary('plistutil').found) {
+    return native.binaryPlistToXml(await fs.promises.readFile(inputPath));
+  }
   ensureAfcWorkDir();
   const outXml = path.join(
     AFC_WORK_ROOT,
@@ -1014,6 +1087,10 @@ async function convertBinaryPlistToXml(inputPath) {
 }
 
 async function convertXmlTextToBinaryPlist(xmlText, outBinaryPath) {
+  if (!resolveBinary('plistutil').found) {
+    await fs.promises.writeFile(outBinaryPath, native.xmlToBinaryPlist(String(xmlText)));
+    return;
+  }
   ensureAfcWorkDir();
   const tmpXml = path.join(
     AFC_WORK_ROOT,

@@ -16,7 +16,11 @@
     "build:linux": "npm run prepare:web && electron-builder --linux AppImage deb"
   },
   "dependencies": {
-    "jszip": "^3.10.2"
+    "appium-ios-device": "^3.1.26",
+    "bplist-creator": "^0.1.1",
+    "bplist-parser": "^0.3.2",
+    "jszip": "^3.10.2",
+    "plist": "^3.1.1"
   },
   "devDependencies": {
     "electron": "^35.1.5",
@@ -35,6 +39,7 @@
       "logger.cjs",
       "iphoneBridge.cjs",
       "afcBridge.cjs",
+      "afcNative.cjs",
       "web-dist/**/*"
     ],
     "win": {
@@ -52,11 +57,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -79,11 +88,15 @@
       "target": [
         {
           "target": "AppImage",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "deb",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     }
