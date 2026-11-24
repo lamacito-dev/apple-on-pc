@@ -9,6 +9,16 @@ contextBridge.exposeInMainWorld('openfsDesktop', {
   listIphoneDirectory: (deviceId, relativePath = '') =>
     ipcRenderer.invoke('openfs:list-iphone-directory', deviceId, relativePath),
   scanIphoneMedia: (deviceId) => ipcRenderer.invoke('openfs:scan-iphone-media', deviceId),
+  getQuickPreview: (name, size, key = '') => ipcRenderer.invoke('openfs:get-quick-preview', name, size, key),
+  prefetchIphonePreview: (deviceId, relativePath, displayName, shellPath = '', afcOptions = {}) =>
+    ipcRenderer.invoke(
+      'openfs:prefetch-iphone-preview',
+      deviceId,
+      relativePath,
+      displayName,
+      shellPath,
+      afcOptions
+    ),
   getThumbnailsBatch: (items, maxSize = 360) =>
     ipcRenderer.invoke('openfs:get-thumbnails-batch', items, maxSize),
   prepareIphonePreview: (deviceId, relativePath, displayName, shellPath = '', afcOptions = {}) =>

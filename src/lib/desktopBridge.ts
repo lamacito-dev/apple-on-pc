@@ -33,6 +33,9 @@ export interface DesktopFsEntry {
 export interface DesktopThumbnailRequest {
   key: string;
   shellPath: string;
+  /** File name and size let the app use the JPEG previews iOS already generated (fast path). */
+  name?: string;
+  size?: number;
 }
 
 export interface DesktopPreviewResult {
@@ -44,6 +47,8 @@ export interface DesktopPreviewResult {
   textContent?: string;
   isBinaryPlist?: boolean;
   editable?: boolean;
+  /** True when a video is streamed from the iPhone instead of copied first (no SHA-256 then). */
+  streamed?: boolean;
 }
 
 export interface DesktopTransferResult {
@@ -130,8 +135,18 @@ export interface OpenFSDesktopAPI {
     relativePath: string,
     displayName?: string,
     shellPath?: string,
-    afcOptions?: { appId?: string }
+    afcOptions?: { appId?: string; size?: number }
   ) => Promise<DesktopPreviewResult>;
+  /** Instant low-resolution JPEG made by iOS for a camera-roll item; '' when unavailable. */
+  getQuickPreview?: (name: string, size?: number, key?: string) => Promise<string>;
+  /** Prepares a preview in the background so opening it next is instant. */
+  prefetchIphonePreview?: (
+    deviceId: string,
+    relativePath: string,
+    displayName?: string,
+    shellPath?: string,
+    afcOptions?: { appId?: string; size?: number }
+  ) => Promise<boolean>;
   preparePcPreview: (filePath: string) => Promise<DesktopPreviewResult>;
   copyFromIphoneToPc: (
     deviceId: string,

@@ -15,8 +15,13 @@ function lib() {
   return iosDevice;
 }
 
-// AFC operation code for RenamePath (not exposed by appium-ios-device's AfcService)
+// AFC operation codes not exposed by appium-ios-device's AfcService
 const AFC_OP_RENAME_PATH = 0x18;
+const AFC_OP_FILE_SEEK = 0x11;
+const AFC_FOPEN_RDONLY = 1;
+// Largest read per AFC request: the library rejects frames above 1 MB, and big reads
+// are ~3x faster than its 64 KB read stream (30 Mo/s vs 11 Mo/s measured on an iPhone).
+const AFC_READ_CHUNK = 960 * 1024;
 const LIST_INFO_CONCURRENCY = 8;
 
 function withTimeout(promise, ms, label) {
@@ -101,13 +106,42 @@ async function nativePair(udid) {
   };
 }
 
+/**
+ * appium-ios-device emits socket/decoder errors as 'error' events; without listeners Node
+ * crashes the whole process. Log them and mark the client dead instead.
+ */
+function guardAfcClient(afc, onDead) {
+  if (!afc || afc.__openfsGuarded) return afc;
+  afc.__openfsGuarded = true;
+  afc.__openfsDead = false;
+  const markDead = (err) => {
+    if (afc.__openfsDead) return;
+    afc.__openfsDead = true;
+    if (err) logWarn('afc-native', 'Connexion AFC interrompue', err);
+    if (onDead) onDead();
+  };
+  for (const stream of [afc._socketClient, afc._splitter, afc._decoder, afc._encoder]) {
+    if (stream && typeof stream.on === 'function') stream.on('error', markDead);
+  }
+  if (afc._socketClient) {
+    afc._socketClient.once('close', () => markDead());
+    afc._socketClient.once('end', () => markDead());
+  }
+  return afc;
+}
+
+function isAfcAlive(afc) {
+  const sock = afc && afc._socketClient;
+  return Boolean(afc && !afc.__openfsDead && sock && !sock.destroyed && sock.writable !== false);
+}
+
 /** Opens an AFC client on the media storage, or on an app's Documents (house_arrest) when appId is set. */
 async function openAfc(udid, appId) {
   const { services } = lib();
   if (appId) {
     const houseArrest = await services.startHouseArrestService(udid);
     try {
-      const afc = await houseArrest.vendDocuments(appId);
+      const afc = guardAfcClient(await houseArrest.vendDocuments(appId));
       return {
         afc,
         close: () => {
@@ -120,7 +154,7 @@ async function openAfc(udid, appId) {
       throw new Error(`Accès aux documents de l’app ${appId} refusé : ${err.message}`);
     }
   }
-  const afc = await services.startAfcService(udid);
+  const afc = guardAfcClient(await services.startAfcService(udid));
   return {
     afc,
     close: () => {
@@ -222,13 +256,239 @@ async function nativeListSharedApps(udid) {
   return list;
 }
 
+async function afcSeek(afc, handle, offset) {
+  const { packetNumber, response } = afc._createPacketPromise(`Seek ${handle} -> ${offset}`);
+  const payload = Buffer.alloc(24);
+  payload.writeBigUInt64LE(BigInt(handle), 0);
+  payload.writeBigUInt64LE(0n, 8); // SEEK_SET
+  payload.writeBigUInt64LE(BigInt(offset), 16);
+  afc._encoder.write({ opCode: AFC_OP_FILE_SEEK, packetNumber, headerPayload: payload });
+  afc._checkStatus(await response);
+}
+
+/** Copies a whole iPhone file to disk with large AFC reads. */
+async function readWholeFileTo(afc, remotePath, destLocalPath) {
+  const handle = await afc.openFile(remotePath, AFC_FOPEN_RDONLY);
+  const out = fs.createWriteStream(destLocalPath);
+  try {
+    for (;;) {
+      const chunk = await afc.readFile(handle, AFC_READ_CHUNK);
+      if (!chunk || chunk.length === 0) break;
+      if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
+    }
+  } finally {
+    await new Promise((resolve, reject) => out.end((err) => (err ? reject(err) : resolve())));
+    await afc.closeFileHandle(handle).catch((err) => logWarn('afc-native', 'Fermeture fichier AFC échouée', err));
+  }
+}
+
 async function nativeDownload(udid, remotePath, destLocalPath, { appId = null } = {}) {
   await withAfc(udid, appId, async (afc) => {
     const info = await afc.getFileInfo(remotePath);
     if (info.isDirectory()) throw new Error(`« ${remotePath} » est un dossier, pas un fichier.`);
-    const readStream = await afc.createReadStream(remotePath, { autoDestroy: true });
-    await pipeline(readStream, fs.createWriteStream(destLocalPath));
+    await readWholeFileTo(afc, remotePath, destLocalPath);
   });
+}
+
+// --- Long-lived media session (thumbnails, previews, video streaming) ---
+// Opening an AFC service costs a lockdown handshake; previews reuse one session per iPhone.
+const mediaSessions = new Map();
+
+async function getMediaSession(udid) {
+  let entry = mediaSessions.get(udid);
+  if (entry && entry.afc && !isAfcAlive(entry.afc)) {
+    mediaSessions.delete(udid);
+    entry = null;
+  }
+  if (!entry) {
+    const created = { afc: null, promise: null };
+    created.promise = lib()
+      .services.startAfcService(udid)
+      .then((afc) => {
+        created.afc = guardAfcClient(afc, () => {
+          if (mediaSessions.get(udid) === created) mediaSessions.delete(udid);
+        });
+        return afc;
+      });
+    created.promise.catch(() => {
+      if (mediaSessions.get(udid) === created) mediaSessions.delete(udid);
+    });
+    mediaSessions.set(udid, created);
+    entry = created;
+  }
+  return entry.promise;
+}
+
+/**
+ * Forgets the shared session after a transport error. Other requests may still be using it,
+ * so it is closed later instead of immediately (closing it under them crashed the process).
+ */
+function dropMediaSession(udid) {
+  const entry = mediaSessions.get(udid);
+  if (!entry) return;
+  mediaSessions.delete(udid);
+  entry.promise.then(
+    (afc) => {
+      setTimeout(() => {
+        try { afc.close(); } catch (err) { logWarn('afc-native', 'Fermeture session média échouée', err); }
+      }, 30000).unref?.();
+    },
+    () => {}
+  );
+}
+
+function isNotFoundError(err) {
+  return /not found|ObjectNotFound|No such file/i.test(String(err && err.message));
+}
+
+/** Runs fn with the shared media session, reconnecting once if the session went stale. */
+async function withMediaSession(udid, fn) {
+  try {
+    return await fn(await getMediaSession(udid));
+  } catch (err) {
+    if (isNotFoundError(err)) throw err;
+    logWarn('afc-native', 'Requête AFC échouée, nouvelle connexion', err);
+    dropMediaSession(udid);
+    return fn(await getMediaSession(udid));
+  }
+}
+
+async function readSmallFile(udid, remotePath) {
+  return withMediaSession(udid, async (afc) => {
+    const handle = await afc.openFile(remotePath, AFC_FOPEN_RDONLY);
+    const parts = [];
+    try {
+      for (;;) {
+        const chunk = await afc.readFile(handle, AFC_READ_CHUNK);
+        if (!chunk || chunk.length === 0) break;
+        parts.push(chunk);
+      }
+    } finally {
+      await afc.closeFileHandle(handle).catch(() => {});
+    }
+    return Buffer.concat(parts);
+  });
+}
+
+async function nativeDownloadShared(udid, remotePath, destLocalPath) {
+  return withMediaSession(udid, (afc) => readWholeFileTo(afc, remotePath, destLocalPath));
+}
+
+/**
+ * Index of the camera roll as seen by AFC: lower-case file name -> [{ path, size, folder, name }].
+ * Lets Windows (WPD) media items be matched to their AFC path by name + size.
+ */
+const dcimIndexCache = new Map();
+const DCIM_INDEX_TTL_MS = 2 * 60 * 1000;
+
+async function getDcimIndex(udid, { refresh = false } = {}) {
+  const cached = dcimIndexCache.get(udid);
+  if (!refresh && cached && Date.now() - cached.at < DCIM_INDEX_TTL_MS) return cached.index;
+  if (!refresh && cached && cached.pending) return cached.pending;
+  const pending = withMediaSession(udid, async (afc) => {
+    const map = new Map();
+    const folders = (await afc.listDirectory('/DCIM')).filter((n) => n && !n.startsWith('.'));
+    for (const folder of folders) {
+      const names = (await afc.listDirectory(`/DCIM/${folder}`)).filter((n) => n && n !== '.' && n !== '..');
+      const infos = await mapLimit(names, LIST_INFO_CONCURRENCY, async (name) => {
+        try { return await afc.getFileInfo(`/DCIM/${folder}/${name}`); } catch { return null; }
+      });
+      names.forEach((name, i) => {
+        if (!infos[i] || infos[i].isDirectory()) return;
+        const key = name.toLowerCase();
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push({ path: `/DCIM/${folder}/${name}`, size: infos[i].size, folder, name });
+      });
+    }
+    return map;
+  });
+  dcimIndexCache.set(udid, { ...(cached || {}), pending });
+  try {
+    const index = await pending;
+    dcimIndexCache.set(udid, { at: Date.now(), index });
+    return index;
+  } catch (err) {
+    dcimIndexCache.delete(udid);
+    throw err;
+  }
+}
+
+/** Finds the AFC path of a camera-roll file from its name (and size when known). */
+async function findDcimFile(udid, name, size) {
+  if (!name) return null;
+  const pick = (index) => {
+    const matches = index.get(String(name).toLowerCase()) || [];
+    if (size) return matches.find((m) => m.size === Number(size)) || null;
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const hit = pick(await getDcimIndex(udid));
+  if (hit) return hit;
+  return pick(await getDcimIndex(udid, { refresh: true }));
+}
+
+/** JPEG preview that iOS already generated for a camera-roll item (about 360x480), or null. */
+async function readIosThumbnail(udid, dcimEntry) {
+  const dir = `/PhotoData/Thumbnails/V2/DCIM/${dcimEntry.folder}/${dcimEntry.name}`;
+  try {
+    const buf = await readSmallFile(udid, `${dir}/5005.JPG`);
+    return buf.length > 0 ? buf : null;
+  } catch (err) {
+    if (!isNotFoundError(err)) logWarn('afc-native', `Miniature iOS illisible (${dir})`, err);
+    return null;
+  }
+}
+
+/**
+ * Web ReadableStream over bytes [start, end] of an iPhone file, read lazily in AFC chunks.
+ * Feeds the <video> element with HTTP Range semantics, so playback starts without a full copy.
+ */
+function createRangeStream(udid, remotePath, start, end) {
+  let afc = null;
+  let handle = null;
+  let position = start;
+  const close = async () => {
+    if (afc && handle !== null) {
+      const h = handle;
+      handle = null;
+      await afc.closeFileHandle(h).catch(() => {});
+    }
+  };
+  return new ReadableStream(
+    {
+      async start() {
+        afc = await getMediaSession(udid);
+        handle = await afc.openFile(remotePath, AFC_FOPEN_RDONLY);
+        if (start > 0) await afcSeek(afc, handle, start);
+      },
+      async pull(controller) {
+        try {
+          if (position > end) {
+            await close();
+            controller.close();
+            return;
+          }
+          const want = Math.min(AFC_READ_CHUNK, end - position + 1);
+          const chunk = await afc.readFile(handle, want);
+          if (!chunk || chunk.length === 0) {
+            await close();
+            controller.close();
+            return;
+          }
+          position += chunk.length;
+          controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.length));
+        } catch (err) {
+          logWarn('afc-native', `Lecture vidéo interrompue (${remotePath})`, err);
+          await close();
+          dropMediaSession(udid);
+          controller.error(err);
+        }
+      },
+      async cancel() {
+        await close();
+      },
+    },
+    { highWaterMark: 2 }
+  );
 }
 
 async function nativeUpload(udid, localFilePath, remoteFilePath, { appId = null } = {}) {
@@ -279,6 +539,11 @@ function xmlToBinaryPlist(xmlText) {
 }
 
 module.exports = {
+  nativeDownloadShared,
+  getDcimIndex,
+  findDcimFile,
+  readIosThumbnail,
+  createRangeStream,
   getNativeUdids,
   isNativeAvailable,
   listNativeDevices,

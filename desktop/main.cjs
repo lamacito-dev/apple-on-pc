@@ -39,7 +39,9 @@ const {
   prepareIphonePreview,
   preparePcPreview,
   scanIphoneMedia,
+  getQuickIphonePreview,
 } = require('./iphoneBridge.cjs');
+const { createRangeStream } = require('./afcNative.cjs');
 
 let mainWindow = null;
 
@@ -57,6 +59,52 @@ function registerMediaUrl(localFilePath) {
   mediaTokenToPath.set(token, resolved);
   pathToMediaToken.set(resolved, token);
   return `openfs-local://media/${token}`;
+}
+
+// Videos streamed straight from the iPhone over AFC: token -> { udid, path, size, name }
+const streamTokenToSource = new Map();
+const streamKeyToToken = new Map();
+
+function registerStreamUrl(source) {
+  const key = `${source.udid}|${source.path}`;
+  let token = streamKeyToToken.get(key);
+  if (!token) {
+    token = crypto.randomBytes(16).toString('hex') + path.extname(source.name || source.path).toLowerCase();
+    streamTokenToSource.set(token, source);
+    streamKeyToToken.set(key, token);
+  }
+  return `openfs-local://stream/${token}`;
+}
+
+function serveStream(request, token) {
+  const source = streamTokenToSource.get(token);
+  if (!source) return new Response('Not found', { status: 404 });
+  const size = Number(source.size) || 0;
+  const range = /bytes=(\d*)-(\d*)/.exec(request.headers.get('range') || '');
+  let start = 0;
+  let end = size - 1;
+  if (range) {
+    if (range[1] === '' && range[2] !== '') {
+      start = Math.max(0, size - Number(range[2]));
+    } else {
+      start = Number(range[1] || 0);
+      if (range[2] !== '') end = Math.min(Number(range[2]), size - 1);
+    }
+  }
+  if (start >= size || start > end) {
+    return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+  }
+  const headers = {
+    'Content-Type': 'video/mp4',
+    'Accept-Ranges': 'bytes',
+    'Content-Length': String(end - start + 1),
+    'Cache-Control': 'no-store',
+  };
+  if (range) headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
+  return new Response(createRangeStream(source.udid, source.path, start, end), {
+    status: range ? 206 : 200,
+    headers,
+  });
 }
 
 protocol.registerSchemesAsPrivileged([
@@ -154,13 +202,37 @@ ipcMain.handle('openfs:get-thumbnails-batch', async (_event, items, maxSize) => 
   return urlMap;
 });
 
+ipcMain.handle('openfs:get-quick-preview', async (_event, name, size, key) => {
+  const localJpg = await getQuickIphonePreview(name, size, key);
+  return localJpg ? registerMediaUrl(localJpg) : '';
+});
+
+// Warms the preview cache for the next/previous item so navigation feels instant.
+ipcMain.handle(
+  'openfs:prefetch-iphone-preview',
+  async (_event, deviceId, relativePath, displayName, shellPath, afcOptions) => {
+    try {
+      await prepareIphonePreview(deviceId, relativePath, displayName, shellPath, afcOptions);
+      return true;
+    } catch (err) {
+      logWarn('preview', `Préchargement échoué pour ${displayName}`, err);
+      return false;
+    }
+  }
+);
+
 ipcMain.handle(
   'openfs:prepare-iphone-preview',
   async (_event, deviceId, relativePath, displayName, shellPath, afcOptions) => {
     const desc = await prepareIphonePreview(deviceId, relativePath, displayName, shellPath, afcOptions);
     return {
       previewKind: desc.previewKind,
-      url: desc.localPath ? registerMediaUrl(desc.localPath) : '',
+      url: desc.streamSource
+        ? registerStreamUrl(desc.streamSource)
+        : desc.localPath
+          ? registerMediaUrl(desc.localPath)
+          : '',
+      streamed: Boolean(desc.streamSource),
       mimeType: desc.mimeType,
       size: desc.size,
       sha256: desc.sha256 || '',
@@ -361,6 +433,9 @@ app.whenReady().then(() => {
     try {
       const url = new URL(request.url);
       const token = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+      if (url.hostname === 'stream') {
+        return serveStream(request, token);
+      }
       const filePath = mediaTokenToPath.get(token);
       if (!filePath || !fs.existsSync(filePath)) {
         return new Response('Not found', { status: 404 });

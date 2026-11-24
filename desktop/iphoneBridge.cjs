@@ -13,6 +13,70 @@ const {
   isBinaryPlistFile,
   listAfcDevices,
 } = require('./afcBridge.cjs');
+const afcNative = require('./afcNative.cjs');
+
+// --- Fast media access through Apple Devices / usbmuxd (AFC) ---
+// Windows' WPD copy is slow (1.3 s per photo, 28 s for an 800 Mo video) and cannot seek.
+// When usbmuxd is reachable, camera-roll items are matched to their AFC path by name + size,
+// which gives instant iOS-made JPEG previews, 30 Mo/s downloads and seekable video streaming.
+let nativeUdidCache = { at: 0, udids: null };
+async function getFastMediaUdid() {
+  if (Date.now() - nativeUdidCache.at > 5000) {
+    nativeUdidCache = { at: Date.now(), udids: await afcNative.getNativeUdids(1500) };
+  }
+  const udids = nativeUdidCache.udids;
+  return udids && udids.length > 0 ? udids[0] : null;
+}
+
+async function resolveFastMedia(name, size) {
+  try {
+    const udid = await getFastMediaUdid();
+    if (!udid) return null;
+    const hit = await afcNative.findDcimFile(udid, name, size);
+    return hit ? { udid, ...hit } : null;
+  } catch (err) {
+    logWarn('preview', `Accès rapide AFC indisponible pour ${name}`, err);
+    return null;
+  }
+}
+
+function isVideoName(name) {
+  return /\.(mov|mp4|m4v)$/i.test(String(name || ''));
+}
+
+async function getIosThumbnailPath(key, name, size) {
+  const outPath = path.join(THUMB_CACHE_ROOT, `${hashKey(`${key}|ios|v1`)}.jpg`);
+  if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) return outPath;
+  const hit = await resolveFastMedia(name, size);
+  if (!hit) return null;
+  let jpg = await afcNative.readIosThumbnail(hit.udid, hit);
+  if (!jpg && isVideoName(name)) {
+    // The video half of a Live Photo has no thumbnail of its own: use its photo's one.
+    const base = String(name).replace(/\.[^.]+$/, '');
+    for (const ext of ['.HEIC', '.JPG']) {
+      const photo = await afcNative.findDcimFile(hit.udid, base + ext);
+      if (photo && photo.folder === hit.folder) {
+        jpg = await afcNative.readIosThumbnail(hit.udid, photo);
+        if (jpg) break;
+      }
+    }
+  }
+  if (!jpg) return null;
+  await fs.promises.writeFile(outPath, jpg);
+  return outPath;
+}
+
+/** Instant preview: the JPEG iOS already generated for this photo/video (about 360x480), or null. */
+async function getQuickIphonePreview(name, size, key = '') {
+  if (!name || !/\.(heic|heif|jpe?g|png|mov|mp4|m4v)$/i.test(name)) return null;
+  ensureCacheDirs();
+  try {
+    return await getIosThumbnailPath(key || `${name}|${size}`, name, size);
+  } catch (err) {
+    logWarn('preview', `Aperçu instantané iOS indisponible pour ${name}`, err);
+    return null;
+  }
+}
 
 const JSON_START_MARKER = '<<<OPENFS_JSON_START>>>';
 const JSON_END_MARKER = '<<<OPENFS_JSON_END>>>';
@@ -401,7 +465,27 @@ public static class OpenFsThumbExtractor {
 }
 '@
 if (-not ('OpenFsThumbExtractor' -as [type])) {
-  Add-Type -TypeDefinition $thumbCode -ReferencedAssemblies System.Drawing
+  # Compiling the C# helper costs ~1 s per PowerShell call: compile it once into a cached DLL
+  # (named after a hash of its source) and load that DLL on every later call.
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $codeHash = -join ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($thumbCode))[0..7] | ForEach-Object { $_.ToString('x2') })
+  $dllDir = Join-Path ([System.IO.Path]::GetTempPath()) 'openfs-helper-cache'
+  $dllPath = Join-Path $dllDir ('OpenFsThumbExtractor_' + $codeHash + '.dll')
+  $loaded = $false
+  if (Test-Path -LiteralPath $dllPath) {
+    try { Add-Type -Path $dllPath -ErrorAction Stop; $loaded = $true } catch { $loaded = $false }
+  }
+  if (-not $loaded) {
+    try {
+      New-Item -ItemType Directory -Force -Path $dllDir | Out-Null
+      $tmpDll = $dllPath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+      Add-Type -TypeDefinition $thumbCode -ReferencedAssemblies System.Drawing -OutputAssembly $tmpDll -OutputType Library -ErrorAction Stop
+      Move-Item -LiteralPath $tmpDll -Destination $dllPath -Force -ErrorAction SilentlyContinue
+      if (Test-Path -LiteralPath $dllPath) { Add-Type -Path $dllPath -ErrorAction Stop } else { Add-Type -Path $tmpDll -ErrorAction Stop }
+    } catch {
+      Add-Type -TypeDefinition $thumbCode -ReferencedAssemblies System.Drawing
+    }
+  }
 }
 `;
 
@@ -1058,6 +1142,31 @@ Write-Output '${JSON_END_MARKER}'
  * logs exact HRESULT failures, and recovers partial disk output even on MTP slowdowns.
  */
 async function generateThumbnailsBatch(items, maxSize = 360) {
+  if (!Array.isArray(items) || items.length === 0) return {};
+  ensureCacheDirs();
+  const result = {};
+  const named = items.filter((it) => it && it.key && it.name && /\.(heic|heif|jpe?g|png|mov|mp4|m4v)$/i.test(it.name));
+  if (named.length > 0 && (await getFastMediaUdid())) {
+    let next = 0;
+    const worker = async () => {
+      while (next < named.length) {
+        const it = named[next++];
+        try {
+          const p = await getIosThumbnailPath(it.key, it.name, it.size);
+          if (p) result[it.key] = p;
+        } catch (err) {
+          logWarn('thumbs', `Miniature iOS indisponible pour ${it.name}`, err);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, named.length) }, worker));
+  }
+  const remaining = items.filter((it) => it && it.key && !result[it.key]);
+  if (remaining.length === 0) return result;
+  return { ...(await generateShellThumbnailsBatch(remaining, maxSize)), ...result };
+}
+
+async function generateShellThumbnailsBatch(items, maxSize = 360) {
   if (process.platform !== 'win32' || !Array.isArray(items) || items.length === 0) {
     return {};
   }
@@ -1585,6 +1694,30 @@ async function prepareIphonePreview(deviceId, relativePath, displayName, shellPa
   let cachedFilePath = existingFiles.length > 0 ? path.join(cacheSubdir, existingFiles[0]) : null;
 
   if (!cachedFilePath || !fs.existsSync(cachedFilePath) || fs.statSync(cachedFilePath).size === 0) {
+    const fast = await resolveFastMedia(displayName, afcOptions && afcOptions.size);
+    if (fast && isVideoName(displayName)) {
+      // Stream the video straight from the iPhone (seekable) instead of copying it first.
+      return {
+        previewKind: 'video',
+        streamSource: { udid: fast.udid, path: fast.path, size: fast.size, name: displayName },
+        mimeType: 'video/mp4',
+        size: fast.size,
+        sha256: '',
+      };
+    }
+    if (fast) {
+      const target = path.join(cacheSubdir, path.basename(displayName).replace(/[<>:"/\\|?*]/g, '_'));
+      try {
+        await afcNative.nativeDownloadShared(fast.udid, fast.path, target);
+        if (fs.existsSync(target) && fs.statSync(target).size === fast.size) {
+          return buildLocalPreviewDescriptor(target, displayName);
+        }
+        fs.rmSync(target, { force: true });
+      } catch (err) {
+        logWarn('preview', `Téléchargement AFC échoué pour ${displayName}, repli sur WPD`, err);
+        fs.rmSync(target, { force: true });
+      }
+    }
     const copied = await copyWpdItemToPc(deviceKey, relativePath, cacheSubdir, shellPath, displayName);
     cachedFilePath = copied.copiedPath;
   }
@@ -1852,6 +1985,7 @@ async function pcExtractZip(zipPath) {
 }
 
 module.exports = {
+  getQuickIphonePreview,
   getDefaultSyncDir,
   getSystemFolder,
   computeFileSha256,

@@ -281,7 +281,7 @@ export function NativeMediaWorkspace({
         batch.forEach((b) => requestedThumbsRef.current.add(getEntryKey(b)));
         try {
           const urls = await bridge.getThumbnailsBatch(
-            batch.map((b) => ({ key: getEntryKey(b), shellPath: b.shellPath! })),
+            batch.map((b) => ({ key: getEntryKey(b), shellPath: b.shellPath!, name: b.name, size: b.size })),
             360
           );
           if (!cancelled && urls && Object.keys(urls).length > 0) {

@@ -90,6 +90,8 @@ export function NativePreviewView({
   const bridge = getDesktopBridge();
   const [preview, setPreview] = useState<DesktopPreviewResult | null>(null);
   const [loading, setLoading] = useState(true);
+  // Low-resolution JPEG made by iOS, shown instantly while the full-quality preview loads
+  const [quickUrl, setQuickUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
   const [naturalDims, setNaturalDims] = useState<{ w: number; h: number } | null>(null);
@@ -126,12 +128,22 @@ export function NativePreviewView({
     setLoading(true);
     setError(null);
     setPreview(null);
+    setQuickUrl(null);
     setZoom(100);
     setNaturalDims(null);
     setEditing(false);
     setSaveVerification(null);
 
     const effectiveDeviceId = afcUdid ? `afc:${afcUdid}` : deviceId;
+    const isCameraRollItem = source === 'iphone' && !afcUdid && Boolean(effectiveDeviceId);
+    if (isCameraRollItem && bridge.getQuickPreview) {
+      bridge
+        .getQuickPreview(entry.name, entry.size, entryKey)
+        .then((url) => {
+          if (!cancelled && url) setQuickUrl(url);
+        })
+        .catch(() => {});
+    }
     const req =
       source === 'iphone' && effectiveDeviceId
         ? bridge.prepareIphonePreview(
@@ -139,7 +151,7 @@ export function NativePreviewView({
             entry.path,
             entry.name,
             entry.shellPath || '',
-            afcAppId ? { appId: afcAppId } : undefined
+            afcAppId ? { appId: afcAppId } : { size: entry.size }
           )
         : bridge.preparePcPreview(entry.path);
 
@@ -148,6 +160,16 @@ export function NativePreviewView({
         if (!cancelled) {
           setPreview(res);
           setDraftText(res.textContent ?? '');
+          // Prepare the neighbouring photos in the background so the next one opens instantly
+          if (isCameraRollItem && bridge.prefetchIphonePreview && effectiveDeviceId) {
+            for (const n of [nextItem, prevItem]) {
+              if (n && /\.(heic|heif|jpe?g|png)$/i.test(n.name)) {
+                bridge
+                  .prefetchIphonePreview(effectiveDeviceId, n.path, n.name, n.shellPath || '', { size: n.size })
+                  .catch(() => {});
+              }
+            }
+          }
           if (res.previewKind === 'image' && res.url && onPreviewImageReady) {
             onPreviewImageReady(entryKey, res.url);
           }
@@ -371,7 +393,19 @@ export function NativePreviewView({
           </div>
 
           <div className="flex-1 min-h-0 p-5 flex items-center justify-center overflow-auto">
-            {loading ? (
+            {loading && quickUrl ? (
+              <div className="relative max-h-full max-w-full flex items-center justify-center">
+                <img
+                  src={quickUrl}
+                  alt={entry.name}
+                  className="max-h-full max-w-full object-contain rounded-xl select-none"
+                />
+                <span className="absolute bottom-2 right-2 flex items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-[11px] text-white">
+                  <RefreshCw size={11} className="animate-spin" />
+                  Pleine qualité…
+                </span>
+              </div>
+            ) : loading ? (
               <div className="flex flex-col items-center gap-3 text-slate-500 dark:text-slate-400 text-sm">
                 <RefreshCw size={22} className="animate-spin text-[#1A65C7]" />
                 <span>Chargement et calcul SHA-256...</span>
