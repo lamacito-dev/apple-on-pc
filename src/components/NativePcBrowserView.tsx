@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { getDesktopBridge, type DesktopFsEntry } from '../lib/desktopBridge';
 import { formatBytes } from '../lib/fsUtils';
+import { useExplorerSelection } from '../lib/useExplorerSelection';
 import { InputDialog } from './Dialogs';
 import { NativePreviewView } from './NativePreviewView';
 
@@ -114,9 +115,9 @@ export function NativePcBrowserView({
     return filteredEntries.filter((e) => set.has(e.path));
   }, [filteredEntries, selectedPaths]);
 
-  const toggleSelect = (p: string) => {
-    setSelectedPaths((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
-  };
+  // Explorer-style Ctrl/Shift multi-selection over the listed files and folders
+  const orderedPaths = useMemo(() => filteredEntries.map((e) => e.path), [filteredEntries]);
+  const explorerSelection = useExplorerSelection(orderedPaths, setSelectedPaths, !previewEntry);
 
   // Progressive thumbnails for images, videos, and PDFs
   useEffect(() => {
@@ -459,13 +460,16 @@ export function NativePcBrowserView({
               return (
                 <div
                   key={entry.path}
-                  onClick={() => {
-                    if (entry.kind === 'folder') {
-                      setCurrentPath(entry.path);
-                    } else {
-                      setPreviewEntry(entry);
-                    }
-                  }}
+                  onClick={(e) =>
+                    explorerSelection.handleItemClick(e, entry.path, () => {
+                      if (entry.kind === 'folder') {
+                        setCurrentPath(entry.path);
+                      } else {
+                        setPreviewEntry(entry);
+                      }
+                    })
+                  }
+                  onMouseDown={explorerSelection.preventShiftTextSelection}
                   className={`group relative rounded-xl border bg-white dark:bg-slate-900 overflow-hidden cursor-pointer transition-all ${
                     isSelected
                       ? 'border-[#1A65C7] ring-2 ring-[#1A65C7]/25'
@@ -498,10 +502,7 @@ export function NativePcBrowserView({
                     <button
                       type="button"
                       aria-label={`Sélectionner ${entry.name}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleSelect(entry.path);
-                      }}
+                      onClick={(e) => explorerSelection.handleCheckboxClick(e, entry.path)}
                       className={`absolute top-2 left-2 w-6 h-6 rounded-md flex items-center justify-center transition-all ${
                         isSelected
                           ? 'bg-[#1A65C7] text-white opacity-100 shadow-xs'
@@ -534,13 +535,16 @@ export function NativePcBrowserView({
               return (
                 <div
                   key={entry.path}
-                  onClick={() => {
-                    if (entry.kind === 'folder') {
-                      setCurrentPath(entry.path);
-                    } else {
-                      setPreviewEntry(entry);
-                    }
-                  }}
+                  onClick={(e) =>
+                    explorerSelection.handleItemClick(e, entry.path, () => {
+                      if (entry.kind === 'folder') {
+                        setCurrentPath(entry.path);
+                      } else {
+                        setPreviewEntry(entry);
+                      }
+                    })
+                  }
+                  onMouseDown={explorerSelection.preventShiftTextSelection}
                   className={`group flex items-center gap-3.5 px-4 py-3 rounded-xl border cursor-pointer transition-colors ${
                     isSelected
                       ? 'border-[#1A65C7] bg-blue-50/40 dark:bg-blue-950/20'
@@ -550,10 +554,7 @@ export function NativePcBrowserView({
                   <button
                     type="button"
                     aria-label={`Sélectionner ${entry.name}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleSelect(entry.path);
-                    }}
+                    onClick={(e) => explorerSelection.handleCheckboxClick(e, entry.path)}
                     className={`w-5 h-5 rounded flex items-center justify-center shrink-0 transition-colors ${
                       isSelected
                         ? 'bg-[#1A65C7] text-white'

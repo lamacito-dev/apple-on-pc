@@ -27,6 +27,7 @@ import {
   type DesktopIphoneDevice,
 } from '../lib/desktopBridge';
 import { formatBytes } from '../lib/fsUtils';
+import { useExplorerSelection } from '../lib/useExplorerSelection';
 import { NativePreviewView } from './NativePreviewView';
 
 interface NativeMediaWorkspaceProps {
@@ -314,11 +315,16 @@ export function NativeMediaWorkspace({
     [filteredItems]
   );
 
-  const toggleSelect = (entryKey: string) => {
-    setSelectedKeys((prev) =>
-      prev.includes(entryKey) ? prev.filter((k) => k !== entryKey) : [...prev, entryKey]
-    );
-  };
+  // Explorer-style Ctrl/Shift multi-selection over the items in display order (grid & list)
+  const orderedItemKeys = useMemo(
+    () => dateGroups.flatMap((g) => g.items.map((i) => getEntryKey(i))),
+    [dateGroups]
+  );
+  const explorerSelection = useExplorerSelection(
+    orderedItemKeys,
+    setSelectedKeys,
+    !previewEntry && layout !== 'folders'
+  );
 
   const toggleSelectGroup = (group: DateGroup) => {
     const groupKeys = group.items.map((i) => getEntryKey(i));
@@ -966,7 +972,10 @@ export function NativeMediaWorkspace({
                         return (
                           <div
                             key={key}
-                            onClick={() => setPreviewEntry(item)}
+                            onClick={(e) =>
+                              explorerSelection.handleItemClick(e, key, () => setPreviewEntry(item))
+                            }
+                            onMouseDown={explorerSelection.preventShiftTextSelection}
                             className={`group relative rounded-xl border bg-white dark:bg-slate-900 overflow-hidden cursor-pointer transition-all ${
                               isSelected
                                 ? 'border-[#1A65C7] ring-2 ring-[#1A65C7]/25'
@@ -1005,10 +1014,7 @@ export function NativeMediaWorkspace({
                               <button
                                 type="button"
                                 aria-label={`Sélectionner ${item.name}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleSelect(key);
-                                }}
+                                onClick={(e) => explorerSelection.handleCheckboxClick(e, key)}
                                 className={`absolute top-2 left-2 w-6 h-6 rounded-md flex items-center justify-center transition-all ${
                                   isSelected
                                     ? 'bg-[#1A65C7] text-white opacity-100 shadow-xs'
@@ -1043,7 +1049,10 @@ export function NativeMediaWorkspace({
                         return (
                           <div
                             key={key}
-                            onClick={() => setPreviewEntry(item)}
+                            onClick={(e) =>
+                              explorerSelection.handleItemClick(e, key, () => setPreviewEntry(item))
+                            }
+                            onMouseDown={explorerSelection.preventShiftTextSelection}
                             className={`group flex items-center gap-3.5 px-3.5 py-2.5 rounded-xl border cursor-pointer transition-all ${
                               isSelected
                                 ? 'border-[#1A65C7] bg-blue-50/45 dark:bg-blue-950/25'
@@ -1053,10 +1062,7 @@ export function NativeMediaWorkspace({
                             <button
                               type="button"
                               aria-label={`Sélectionner ${item.name}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleSelect(key);
-                              }}
+                              onClick={(e) => explorerSelection.handleCheckboxClick(e, key)}
                               className={`w-5 h-5 rounded flex items-center justify-center shrink-0 transition-colors ${
                                 isSelected
                                   ? 'bg-[#1A65C7] text-white'
