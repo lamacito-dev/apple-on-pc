@@ -26,7 +26,24 @@ const html = fs.readFileSync(distIndex, 'utf8');
 if (!html.includes(marker)) {
   throw new Error('[prerender] <div id="root"></div> introuvable dans dist/index.html');
 }
-fs.writeFileSync(distIndex, html.replace(marker, `<div id="root" data-prerendered="landing">${appHtml}</div>`));
+// With pre-rendered text, the page paints before the web fonts arrive, so visitors briefly saw a
+// fallback font (~170 ms on a 4G-like connection) before Plus Jakarta Sans swapped in.
+// Preload the Latin font files used by the page so they download alongside the stylesheet.
+const fontFiles = fs
+  .readdirSync(path.join(root, 'dist', 'assets'))
+  .filter((f) => /^(plus-jakarta-sans-latin-(400|500|600|700)|jetbrains-mono-latin-(400|500))-normal-.*\.woff2$/.test(f))
+  .sort();
+const fontPreloads = fontFiles
+  .map((f) => `    <link rel="preload" href="/assets/${f}" as="font" type="font/woff2" crossorigin />`)
+  .join('\n');
+const withPreloads = fontPreloads
+  ? html.replace('<meta charset="UTF-8" />', `<meta charset="UTF-8" />\n${fontPreloads}`)
+  : html;
+fs.writeFileSync(
+  distIndex,
+  withPreloads.replace(marker, `<div id="root" data-prerendered="landing">${appHtml}</div>`)
+);
+console.log(`[prerender] ${fontFiles.length} polices préchargées.`);
 fs.rmSync(path.join(root, 'dist-ssr'), { recursive: true, force: true });
 
 const words = appHtml.replace(/<[^>]+>/g, ' ').split(/\s+/).filter(Boolean).length;
