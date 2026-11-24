@@ -125,7 +125,11 @@ export interface OpenFSDesktopAPI {
   platform: string;
   listIphoneDevices: () => Promise<DesktopIphoneDevice[]>;
   listIphoneDirectory: (deviceId: string, relativePath?: string) => Promise<DesktopFsEntry[]>;
-  scanIphoneMedia: (deviceId: string) => Promise<DesktopFsEntry[]>;
+  scanIphoneMedia: (deviceId: string, deviceName?: string) => Promise<DesktopFsEntry[]>;
+  /** Last photo-library list saved for this iPhone (shown instantly while a fresh scan runs), or null. */
+  getCachedIphoneMedia?: (deviceId: string, deviceName?: string) => Promise<DesktopFsEntry[] | null>;
+  /** Thumbnails produced late by Windows (cold iPhone connection); returns an unsubscribe function. */
+  onLateThumbnails?: (callback: (urls: Record<string, string>) => void) => () => void;
   getThumbnailsBatch: (
     items: DesktopThumbnailRequest[],
     maxSize?: number

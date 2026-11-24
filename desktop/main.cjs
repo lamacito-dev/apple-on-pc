@@ -190,12 +190,61 @@ ipcMain.handle('openfs:list-iphone-directory', async (_event, deviceId, relative
   return listIphoneDirectory(deviceId, relativePath);
 });
 
-ipcMain.handle('openfs:scan-iphone-media', async (_event, deviceId) => {
-  return scanIphoneMedia(deviceId);
+// --- Photo library cache ---
+// Windows (WPD) is the right source for the camera roll (it hides deleted items and shows real names,
+// unlike a raw AFC /DCIM listing), but its first scan after start/plug-in can take ~20 s. The last
+// list is cached on disk so the library shows instantly; the UI then refreshes it in the background.
+function getMediaCacheDir() {
+  return path.join(app.getPath('userData'), 'media-cache');
+}
+
+function getMediaCacheFile(deviceId) {
+  return path.join(getMediaCacheDir(), `${crypto.createHash('sha1').update(String(deviceId)).digest('hex')}.json`);
+}
+
+async function writeMediaCache(deviceId, deviceName, items) {
+  try {
+    await fs.promises.mkdir(getMediaCacheDir(), { recursive: true });
+    const payload = JSON.stringify({ deviceId, deviceName: deviceName || '', savedAt: new Date().toISOString(), items });
+    await fs.promises.writeFile(getMediaCacheFile(deviceId), payload);
+    // Fallback for the same iPhone plugged into another USB port (different Windows device id)
+    await fs.promises.writeFile(path.join(getMediaCacheDir(), 'last.json'), payload);
+  } catch (err) {
+    logWarn('media-cache', 'Enregistrement du cache de la photothèque échoué', err);
+  }
+}
+
+async function readMediaCache(deviceId, deviceName) {
+  for (const file of [getMediaCacheFile(deviceId), path.join(getMediaCacheDir(), 'last.json')]) {
+    try {
+      const data = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+      const sameDevice = data.deviceId === deviceId || (deviceName && data.deviceName === deviceName);
+      if (sameDevice && Array.isArray(data.items)) return data.items;
+    } catch {
+      // no cache yet
+    }
+  }
+  return null;
+}
+
+ipcMain.handle('openfs:scan-iphone-media', async (_event, deviceId, deviceName) => {
+  const items = await scanIphoneMedia(deviceId);
+  writeMediaCache(deviceId, deviceName, items);
+  return items;
 });
 
-ipcMain.handle('openfs:get-thumbnails-batch', async (_event, items, maxSize) => {
-  const map = await generateThumbnailsBatch(items, maxSize || 360);
+ipcMain.handle('openfs:get-cached-iphone-media', async (_event, deviceId, deviceName) => {
+  return readMediaCache(deviceId, deviceName);
+});
+
+ipcMain.handle('openfs:get-thumbnails-batch', async (event, items, maxSize) => {
+  // Slow Windows Shell thumbnails arrive later through 'openfs:thumbnails-late'
+  const map = await generateThumbnailsBatch(items, maxSize || 360, (late) => {
+    if (event.sender.isDestroyed()) return;
+    const lateUrls = {};
+    for (const [key, localJpgPath] of Object.entries(late)) lateUrls[key] = registerMediaUrl(localJpgPath);
+    event.sender.send('openfs:thumbnails-late', lateUrls);
+  });
   const urlMap = {};
   for (const [key, localJpgPath] of Object.entries(map)) {
     urlMap[key] = registerMediaUrl(localJpgPath);

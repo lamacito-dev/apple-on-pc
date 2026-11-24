@@ -123,6 +123,8 @@ export function NativeMediaWorkspace({
 
   const [allMedia, setAllMedia] = useState<DesktopFsEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  // True while a fresh scan replaces the cached library shown at start-up
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>('all');
@@ -157,25 +159,45 @@ export function NativeMediaWorkspace({
   const [rawEntries, setRawEntries] = useState<DesktopFsEntry[]>([]);
   const [rawLoading, setRawLoading] = useState(false);
 
+  // The device name changes from « Apple iPhone » to its real name once Apple Devices answers;
+  // read it through a ref so that change does not trigger a full library reload.
+  const deviceNameRef = useRef(device.name);
+  deviceNameRef.current = device.name;
+
   const loadAllMedia = useCallback(async () => {
     if (!bridge) return;
-    setLoading(true);
+    const keepMedia = (list: DesktopFsEntry[]) =>
+      list.filter((e) => e.mediaType === 'photo' || e.mediaType === 'video' || e.mediaType === 'document');
     setError(null);
+    // Show the last saved list instantly; the Windows scan below can take ~20 s after start-up.
+    let showedCache = false;
+    if (bridge.getCachedIphoneMedia) {
+      try {
+        const cached = await bridge.getCachedIphoneMedia(device.id, deviceNameRef.current);
+        if (cached && cached.length > 0) {
+          setAllMedia(keepMedia(cached));
+          setLoading(false);
+          showedCache = true;
+        }
+      } catch {
+        // no cache: fall back to the normal loading state
+      }
+    }
+    if (showedCache) setRefreshing(true);
+    else setLoading(true);
     try {
-      const scanned = await bridge.scanIphoneMedia(device.id);
-      const mediaOnly = scanned.filter(
-        (e) => e.mediaType === 'photo' || e.mediaType === 'video' || e.mediaType === 'document'
-      );
-      setAllMedia(mediaOnly);
-      setSelectedKeys([]);
+      const fresh = keepMedia(await bridge.scanIphoneMedia(device.id, deviceNameRef.current));
+      setAllMedia(fresh);
+      const freshKeys = new Set(fresh.map((e) => getEntryKey(e)));
+      setSelectedKeys((prev) => prev.filter((k) => freshKeys.has(k)));
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Impossible d’analyser la bibliothèque de votre iPhone.'
-      );
+      const message =
+        err instanceof Error ? err.message : 'Impossible d’analyser la bibliothèque de votre iPhone.';
+      if (showedCache) onToast(`Actualisation de la photothèque impossible : ${message}`, 'error');
+      else setError(message);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [bridge, device.id]);
 
@@ -249,6 +271,12 @@ export function NativeMediaWorkspace({
     );
   }, [filteredItems, granularity, sortDirection]);
 
+  // Thumbnails Windows produces late (cold connection) are pushed by the app when ready
+  useEffect(() => {
+    if (!bridge?.onLateThumbnails) return;
+    return bridge.onLateThumbnails((urls) => setThumbs((prev) => ({ ...prev, ...urls })));
+  }, [bridge]);
+
   const handleRetryMissingThumbs = useCallback(() => {
     const nextRequested = new Set<string>();
     for (const [k, url] of Object.entries(thumbs)) {
@@ -286,7 +314,9 @@ export function NativeMediaWorkspace({
             batch.map((b) => ({ key: getEntryKey(b), shellPath: b.shellPath!, name: b.name, size: b.size })),
             360
           );
-          if (!cancelled && urls && Object.keys(urls).length > 0) {
+          // Keep results even if this run was cancelled: these keys are already marked as requested,
+          // and the cached library is replaced by the fresh scan (same keys) while batches are in flight.
+          if (urls && Object.keys(urls).length > 0) {
             setThumbs((prev) => ({ ...prev, ...urls }));
           }
         } catch (err) {
@@ -656,12 +686,12 @@ export function NativeMediaWorkspace({
 
           <button
             type="button"
-            disabled={loading}
+            disabled={loading || refreshing}
             onClick={loadAllMedia}
-            title="Actualiser l’iPhone"
+            title={refreshing ? 'Actualisation de la photothèque…' : 'Actualiser l’iPhone'}
             className="w-8 h-8 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-center transition-colors"
           >
-            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            <RefreshCw size={13} className={loading || refreshing ? 'animate-spin' : ''} />
           </button>
 
           {layout !== 'folders' && bridge?.zipIphoneItems && (

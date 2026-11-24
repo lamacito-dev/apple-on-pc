@@ -8,7 +8,10 @@ contextBridge.exposeInMainWorld('openfsDesktop', {
   listIphoneDevices: () => ipcRenderer.invoke('openfs:list-iphone-devices'),
   listIphoneDirectory: (deviceId, relativePath = '') =>
     ipcRenderer.invoke('openfs:list-iphone-directory', deviceId, relativePath),
-  scanIphoneMedia: (deviceId) => ipcRenderer.invoke('openfs:scan-iphone-media', deviceId),
+  scanIphoneMedia: (deviceId, deviceName) =>
+    ipcRenderer.invoke('openfs:scan-iphone-media', deviceId, deviceName),
+  getCachedIphoneMedia: (deviceId, deviceName) =>
+    ipcRenderer.invoke('openfs:get-cached-iphone-media', deviceId, deviceName),
   getQuickPreview: (name, size, key = '') => ipcRenderer.invoke('openfs:get-quick-preview', name, size, key),
   prefetchIphonePreview: (deviceId, relativePath, displayName, shellPath = '', afcOptions = {}) =>
     ipcRenderer.invoke(
@@ -19,6 +22,11 @@ contextBridge.exposeInMainWorld('openfsDesktop', {
       shellPath,
       afcOptions
     ),
+  onLateThumbnails: (callback) => {
+    const listener = (_event, urls) => callback(urls);
+    ipcRenderer.on('openfs:thumbnails-late', listener);
+    return () => ipcRenderer.removeListener('openfs:thumbnails-late', listener);
+  },
   getThumbnailsBatch: (items, maxSize = 360) =>
     ipcRenderer.invoke('openfs:get-thumbnails-batch', items, maxSize),
   prepareIphonePreview: (deviceId, relativePath, displayName, shellPath = '', afcOptions = {}) =>

@@ -22,7 +22,11 @@ const afcNative = require('./afcNative.cjs');
 let nativeUdidCache = { at: 0, udids: null };
 async function getFastMediaUdid() {
   if (Date.now() - nativeUdidCache.at > 5000) {
-    nativeUdidCache = { at: Date.now(), udids: await afcNative.getNativeUdids(1500) };
+    const udids = await afcNative.getNativeUdids(3000);
+    // Only remember a positive answer: a slow first reply at start-up must not disable the fast
+    // path (instant thumbnails/previews) for the next seconds.
+    nativeUdidCache = udids && udids.length > 0 ? { at: Date.now(), udids } : { at: 0, udids: null };
+    return udids && udids.length > 0 ? udids[0] : null;
   }
   const udids = nativeUdidCache.udids;
   return udids && udids.length > 0 ? udids[0] : null;
@@ -1141,12 +1145,18 @@ Write-Output '${JSON_END_MARKER}'
  * Uses safe 24bpp JPEG rendering, SIIGBF flag cascade (0x09 -> 0x08 -> 0x01 -> 0x00),
  * logs exact HRESULT failures, and recovers partial disk output even on MTP slowdowns.
  */
-async function generateThumbnailsBatch(items, maxSize = 360) {
+/**
+ * Thumbnails for a batch of library items. iOS-made JPEGs (already cached on disk, or read over AFC)
+ * are returned right away. Items without one fall back to Windows Shell thumbnails, which can take
+ * ~20 s while Windows' iPhone connection is cold: when `onLate` is given, those are produced in the
+ * background and delivered through `onLate(map)` instead of holding back the whole batch.
+ */
+async function generateThumbnailsBatch(items, maxSize = 360, onLate = null) {
   if (!Array.isArray(items) || items.length === 0) return {};
   ensureCacheDirs();
   const result = {};
   const named = items.filter((it) => it && it.key && it.name && /\.(heic|heif|jpe?g|png|mov|mp4|m4v)$/i.test(it.name));
-  if (named.length > 0 && (await getFastMediaUdid())) {
+  if (named.length > 0) {
     let next = 0;
     const worker = async () => {
       while (next < named.length) {
@@ -1163,6 +1173,14 @@ async function generateThumbnailsBatch(items, maxSize = 360) {
   }
   const remaining = items.filter((it) => it && it.key && !result[it.key]);
   if (remaining.length === 0) return result;
+  if (typeof onLate === 'function') {
+    generateShellThumbnailsBatch(remaining, maxSize)
+      .then((late) => {
+        if (late && Object.keys(late).length > 0) onLate(late);
+      })
+      .catch((err) => logWarn('thumbs', 'Miniatures Windows en arrière-plan échouées', err));
+    return result;
+  }
   return { ...(await generateShellThumbnailsBatch(remaining, maxSize)), ...result };
 }
 
